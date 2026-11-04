@@ -1,0 +1,23 @@
+name: ordeus
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ordeus
+      POSTGRES_PASSWORD: ordeus
+      POSTGRES_DB: ordeus
+    ports:
+      # Local development only: reachable from this machine, not the network.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ordeus -d ordeus"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres-data:
