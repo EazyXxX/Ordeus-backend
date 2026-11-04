@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -105,5 +106,42 @@ func TestSetModelAppliesToNextRequest(t *testing.T) {
 	}
 	if seen != "second" {
 		t.Errorf("model = %q", seen)
+	}
+}
+
+func TestTranscribeSendsAudioAndJoinsParts(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var request struct {
+			Messages []struct {
+				Content []contentPart `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		audio := request.Messages[0].Content[1].InputAudio
+		if audio == nil || audio.Format != "wav" || audio.Data == "" {
+			t.Errorf("audio part = %+v", audio)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":" часть "}}]}`))
+	}))
+	defer server.Close()
+
+	wav := encodeWAV(tone(100, 1000))
+	text, err := New(server.URL, "", "m", "").Transcribe(context.Background(), wav)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || text != "часть часть" {
+		t.Errorf("requests = %d, text = %q", requests, text)
+	}
+}
+
+func TestTranscribeRejectsInvalidAudio(t *testing.T) {
+	_, err := New("http://unused", "", "m", "").Transcribe(context.Background(), []byte("nope"))
+	if !errors.Is(err, errInvalidAudio) {
+		t.Errorf("err = %v", err)
 	}
 }

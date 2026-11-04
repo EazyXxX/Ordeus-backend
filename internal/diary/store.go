@@ -16,6 +16,9 @@ const (
 	uniqueViolationCode = "23505"
 )
 
+// New folders take the next color, so they stay easy to tell apart on the graph.
+var folderColorRotation = []string{"red", "orange", "yellow", "green", "blue", "purple", "pink"}
+
 var (
 	errNotFound = errors.New("not found")
 	errConflict = errors.New("conflict")
@@ -41,11 +44,14 @@ type Note struct {
 type Folder struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
+	Color string `json:"color"`
 	Notes int    `json:"notes"`
 }
 
 type Tag struct {
+	ID    string `json:"id"`
 	Name  string `json:"name"`
+	Color string `json:"color"`
 	Notes int    `json:"notes"`
 }
 
@@ -114,7 +120,7 @@ func (s *store) notes(ctx context.Context, filter NoteFilter) ([]Note, error) {
 
 func (s *store) folders(ctx context.Context) ([]Folder, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT f.id::text, f.name, count(n.id)::int
+		SELECT f.id::text, f.name, f.color, count(n.id)::int
 		FROM diary_folders f
 		LEFT JOIN diary_notes n ON n.folder_id = f.id
 		GROUP BY f.id
@@ -127,7 +133,7 @@ func (s *store) folders(ctx context.Context) ([]Folder, error) {
 
 func (s *store) tags(ctx context.Context) ([]Tag, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT t.name, count(*)::int
+		SELECT t.id::text, t.name, t.color, count(*)::int
 		FROM diary_tags t
 		JOIN diary_note_tags nt ON nt.tag_id = t.id
 		GROUP BY t.id
@@ -188,12 +194,21 @@ func (s *store) deleteNote(ctx context.Context, id string) error {
 	return requireRow(tag.RowsAffected(), err)
 }
 
-func (s *store) renameFolder(ctx context.Context, id, name string) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE diary_folders SET name = $2 WHERE id = $1`, id, name)
+// updateFolder changes only the fields that are not nil.
+func (s *store) updateFolder(ctx context.Context, id string, name, color *string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE diary_folders
+		SET name = COALESCE($2, name), color = COALESCE($3, color)
+		WHERE id = $1`, id, name, color)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
 		return errConflict
 	}
+	return requireRow(tag.RowsAffected(), err)
+}
+
+func (s *store) updateTagColor(ctx context.Context, id, color string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE diary_tags SET color = $2 WHERE id = $1`, id, color)
 	return requireRow(tag.RowsAffected(), err)
 }
 
@@ -331,9 +346,10 @@ func ensureFolder(ctx context.Context, tx pgx.Tx, name string) (*string, error) 
 	}
 	var id string
 	err := tx.QueryRow(ctx, `
-		INSERT INTO diary_folders (name) VALUES ($1)
+		INSERT INTO diary_folders (name, color)
+		SELECT $1, ($2::text[])[count(*) % cardinality($2::text[]) + 1] FROM diary_folders
 		ON CONFLICT (lower(name)) DO UPDATE SET name = diary_folders.name
-		RETURNING id::text`, name).Scan(&id)
+		RETURNING id::text`, name, folderColorRotation).Scan(&id)
 	return &id, err
 }
 

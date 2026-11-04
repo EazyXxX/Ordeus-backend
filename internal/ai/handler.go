@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -18,6 +19,9 @@ import (
 const (
 	modelSettingKey  = "ai.model"
 	listModelTimeout = 3 * time.Second
+
+	// Ten minutes of 16 kHz mono audio, the longest recording the app makes.
+	maxAudioBytes = 10*60*bytesPerSecond + wavHeaderSize
 )
 
 // RestoreModel applies the model chosen in the app, if any.
@@ -43,6 +47,10 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, client *Client) {
 			"models":    models,
 			"available": available,
 		})
+	})
+
+	mux.HandleFunc("POST /api/ai/transcribe", func(w http.ResponseWriter, r *http.Request) {
+		transcribe(w, r, client)
 	})
 
 	mux.HandleFunc("PUT /api/ai/model", func(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +83,25 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, client *Client) {
 		client.SetModel(input.Model)
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+func transcribe(w http.ResponseWriter, r *http.Request, client *Client) {
+	wav, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxAudioBytes))
+	if err != nil {
+		httpjson.Error(w, http.StatusRequestEntityTooLarge, "recording is too long")
+		return
+	}
+
+	text, err := client.Transcribe(r.Context(), wav)
+	switch {
+	case errors.Is(err, errInvalidAudio):
+		httpjson.Error(w, http.StatusBadRequest, err.Error())
+	case err != nil:
+		slog.Warn("transcribe", "model", client.Model(), "error", err)
+		httpjson.Error(w, http.StatusBadGateway, "model could not transcribe the recording")
+	default:
+		httpjson.Write(w, http.StatusOK, map[string]string{"text": text})
+	}
 }
 
 // listModels never fails the request: a stopped provider is a state the

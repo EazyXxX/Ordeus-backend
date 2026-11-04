@@ -5,6 +5,7 @@ package ai
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,11 @@ import (
 	"sync/atomic"
 )
 
-const maxErrorBodyBytes = 500
+const (
+	maxErrorBodyBytes     = 500
+	structuredTemperature = 0.2
+	transcribePrompt      = "Расшифруй эту аудиозапись дословно на языке оригинала. Верни только текст речи, без комментариев."
+)
 
 type Client struct {
 	baseURL string
@@ -87,9 +92,21 @@ func (c *Client) authorize(request *http.Request) {
 	}
 }
 
+// message content is text, or a list of parts for audio.
 type message struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content any    `json:"content"`
+}
+
+type contentPart struct {
+	Type       string      `json:"type"`
+	Text       string      `json:"text,omitempty"`
+	InputAudio *inputAudio `json:"input_audio,omitempty"`
+}
+
+type inputAudio struct {
+	Data   string `json:"data"`
+	Format string `json:"format"`
 }
 
 type jsonSchemaFormat struct {
@@ -104,30 +121,30 @@ type responseFormat struct {
 }
 
 type chatRequest struct {
-	Model           string         `json:"model"`
-	Temperature     float64        `json:"temperature"`
-	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
-	Messages        []message      `json:"messages"`
-	ResponseFormat  responseFormat `json:"response_format"`
+	Model           string          `json:"model"`
+	Temperature     float64         `json:"temperature"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	Messages        []message       `json:"messages"`
+	ResponseFormat  *responseFormat `json:"response_format,omitempty"`
 }
 
 type chatResponse struct {
 	Choices []struct {
-		Message message `json:"message"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
 	} `json:"choices"`
 }
 
 // Structured asks the model for JSON matching schema and decodes it into target.
 func (c *Client) Structured(ctx context.Context, system, user, name string, schema, target any) error {
-	body, err := json.Marshal(chatRequest{
-		Model:           c.Model(),
-		Temperature:     0.2,
-		ReasoningEffort: c.reasoningEffort,
+	content, err := c.complete(ctx, chatRequest{
+		Temperature: structuredTemperature,
 		Messages: []message{
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
 		},
-		ResponseFormat: responseFormat{
+		ResponseFormat: &responseFormat{
 			Type:       "json_schema",
 			JSONSchema: jsonSchemaFormat{Name: name, Strict: true, Schema: schema},
 		},
@@ -135,38 +152,83 @@ func (c *Client) Structured(ctx context.Context, system, user, name string, sche
 	if err != nil {
 		return err
 	}
+	if err := json.Unmarshal([]byte(content), target); err != nil {
+		return fmt.Errorf("decode structured output: %w", err)
+	}
+	return nil
+}
 
+// Transcribe turns recorded speech into text. Long audio goes to the model in
+// parts, because a single request has to fit the model's context.
+func (c *Client) Transcribe(ctx context.Context, wav []byte) (string, error) {
+	pcm, err := parseWAV(wav)
+	if err != nil {
+		return "", err
+	}
+
+	var parts []string
+	for _, chunk := range splitPCM(pcm, maxChunkBytes) {
+		text, err := c.transcribeChunk(ctx, chunk)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, strings.TrimSpace(text))
+	}
+	return strings.TrimSpace(strings.Join(parts, " ")), nil
+}
+
+func (c *Client) transcribeChunk(ctx context.Context, pcm []byte) (string, error) {
+	return c.complete(ctx, chatRequest{
+		Messages: []message{{
+			Role: "user",
+			Content: []contentPart{
+				{Type: "text", Text: transcribePrompt},
+				{Type: "input_audio", InputAudio: &inputAudio{
+					Data:   base64.StdEncoding.EncodeToString(encodeWAV(pcm)),
+					Format: "wav",
+				}},
+			},
+		}},
+	})
+}
+
+// complete sends a chat request with the current model and returns the answer.
+func (c *Client) complete(ctx context.Context, chat chatRequest) (string, error) {
+	chat.Model = c.Model()
+	chat.ReasoningEffort = c.reasoningEffort
+
+	body, err := json.Marshal(chat)
+	if err != nil {
+		return "", err
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return "", err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	c.authorize(request)
 
 	response, err := c.http.Do(request)
 	if err != nil {
-		return fmt.Errorf("model request: %w", err)
+		return "", fmt.Errorf("model request: %w", err)
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, maxErrorBodyBytes))
-		return fmt.Errorf("model returned %d: %s", response.StatusCode, detail)
+		return "", fmt.Errorf("model returned %d: %s", response.StatusCode, detail)
 	}
 
-	var chat chatResponse
-	if err := json.NewDecoder(response.Body).Decode(&chat); err != nil {
-		return fmt.Errorf("decode model response: %w", err)
+	var answer chatResponse
+	if err := json.NewDecoder(response.Body).Decode(&answer); err != nil {
+		return "", fmt.Errorf("decode model response: %w", err)
 	}
-	if len(chat.Choices) == 0 {
-		return errors.New("model returned no choices")
+	if len(answer.Choices) == 0 {
+		return "", errors.New("model returned no choices")
 	}
-	content := chat.Choices[0].Message.Content
+	content := answer.Choices[0].Message.Content
 	if strings.TrimSpace(content) == "" {
-		return errors.New("model returned an empty answer")
+		return "", errors.New("model returned an empty answer")
 	}
-	if err := json.Unmarshal([]byte(content), target); err != nil {
-		return fmt.Errorf("decode structured output: %w", err)
-	}
-	return nil
+	return content, nil
 }

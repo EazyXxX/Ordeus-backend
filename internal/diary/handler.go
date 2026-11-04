@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"ordeus/backend/internal/httpjson"
+	"ordeus/backend/internal/kanban"
 )
 
 const (
@@ -26,10 +27,11 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/diary/notes/{id}", s.deleteNote)
 
 	mux.HandleFunc("GET /api/diary/folders", s.listFolders)
-	mux.HandleFunc("PATCH /api/diary/folders/{id}", s.renameFolder)
+	mux.HandleFunc("PATCH /api/diary/folders/{id}", s.updateFolder)
 	mux.HandleFunc("DELETE /api/diary/folders/{id}", s.deleteFolder)
 
 	mux.HandleFunc("GET /api/diary/tags", s.listTags)
+	mux.HandleFunc("PATCH /api/diary/tags/{id}", s.updateTag)
 
 	mux.HandleFunc("GET /api/diary/captures", s.listCaptures)
 	mux.HandleFunc("POST /api/diary/captures", s.createCapture)
@@ -85,20 +87,26 @@ func (s *Service) listFolders(w http.ResponseWriter, r *http.Request) {
 	respond(w, r, folders, err)
 }
 
-func (s *Service) renameFolder(w http.ResponseWriter, r *http.Request) {
+func (s *Service) updateFolder(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Name string `json:"name"`
+		Name  *string `json:"name"`
+		Color *string `json:"color"`
 	}
 	id, ok := httpjson.PathID(w, r)
 	if !ok || !httpjson.Bind(w, r, &input) {
 		return
 	}
-	input.Name = strings.TrimSpace(input.Name)
-	if input.Name == "" || utf8.RuneCountInString(input.Name) > maxTitleLength {
-		httpjson.Error(w, http.StatusBadRequest, "name must be 1 to 200 characters long")
+	if input.Name != nil {
+		*input.Name = strings.TrimSpace(*input.Name)
+		if *input.Name == "" || utf8.RuneCountInString(*input.Name) > maxTitleLength {
+			httpjson.Error(w, http.StatusBadRequest, "name must be 1 to 200 characters long")
+			return
+		}
+	}
+	if input.Color != nil && !validColor(w, *input.Color) {
 		return
 	}
-	finish(w, r, s.store.renameFolder(r.Context(), id, input.Name))
+	finish(w, r, s.store.updateFolder(r.Context(), id, input.Name, input.Color))
 }
 
 func (s *Service) deleteFolder(w http.ResponseWriter, r *http.Request) {
@@ -110,6 +118,17 @@ func (s *Service) deleteFolder(w http.ResponseWriter, r *http.Request) {
 func (s *Service) listTags(w http.ResponseWriter, r *http.Request) {
 	tags, err := s.store.tags(r.Context())
 	respond(w, r, tags, err)
+}
+
+func (s *Service) updateTag(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Color string `json:"color"`
+	}
+	id, ok := httpjson.PathID(w, r)
+	if !ok || !httpjson.Bind(w, r, &input) || !validColor(w, input.Color) {
+		return
+	}
+	finish(w, r, s.store.updateTagColor(r.Context(), id, input.Color))
 }
 
 func (s *Service) listCaptures(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +173,14 @@ func (s *Service) deleteCapture(w http.ResponseWriter, r *http.Request) {
 	if id, ok := httpjson.PathID(w, r); ok {
 		finish(w, r, s.store.deleteFailedCapture(r.Context(), id))
 	}
+}
+
+func validColor(w http.ResponseWriter, color string) bool {
+	if !slices.Contains(kanban.Colors, color) {
+		httpjson.Error(w, http.StatusBadRequest, "unknown color")
+		return false
+	}
+	return true
 }
 
 func validNote(w http.ResponseWriter, input *NoteInput) bool {
