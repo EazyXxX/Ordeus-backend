@@ -189,7 +189,7 @@ func cardProblem(input *CardInput) string {
 	switch {
 	case utf8.RuneCountInString(input.Description) > maxDescriptionLength:
 		return "description is too long"
-	case input.Color != "" && !slices.Contains(Colors, input.Color):
+	case !slices.Contains(Colors, input.Color):
 		return "unknown color"
 	case !slices.Contains(priorities, input.Priority):
 		return "unknown priority"

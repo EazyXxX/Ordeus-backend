@@ -149,8 +149,8 @@ func (s *store) createCard(ctx context.Context, userID, columnID, title string) 
 		return tx.QueryRow(ctx, `
 			INSERT INTO kanban_cards (user_id, column_id, title, position)
 			SELECT $1, $2, $3, COALESCE(MAX(position) + 1, 0) FROM kanban_cards WHERE column_id = $2
-			RETURNING id::text, created_at, updated_at`, userID, columnID, title,
-		).Scan(&card.ID, &card.CreatedAt, &card.UpdatedAt)
+			RETURNING id::text, color, created_at, updated_at`, userID, columnID, title,
+		).Scan(&card.ID, &card.Color, &card.CreatedAt, &card.UpdatedAt)
 	})
 	return card, err
 }

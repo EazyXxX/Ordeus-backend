@@ -3,7 +3,7 @@ package kanban
 import "testing"
 
 func validInput() CardInput {
-	return CardInput{Title: "Задача", Priority: "none"}
+	return CardInput{Title: "Задача", Color: "gray", Priority: "none"}
 }
 
 func TestCardProblem(t *testing.T) {
@@ -22,6 +22,7 @@ func TestCardProblem(t *testing.T) {
 			input.DueDate = &goodDate
 		}, ""},
 		{"unknown color", func(input *CardInput) { input.Color = "#fff" }, "unknown color"},
+		{"no color", func(input *CardInput) { input.Color = "" }, "unknown color"},
 		{"unknown priority", func(input *CardInput) { input.Priority = "" }, "unknown priority"},
 		{"invalid date", func(input *CardInput) { input.DueDate = &badDate }, "invalid due date"},
 		{"too many items", func(input *CardInput) {
