@@ -86,26 +86,20 @@ func TestModels(t *testing.T) {
 	}
 }
 
-func TestSetModelAppliesToNextRequest(t *testing.T) {
-	var seen string
+func TestStructuredAcceptsFencedJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request chatRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatal(err)
-		}
-		seen = request.Model
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"` + "```json\\n{\\\"value\\\":\\\"ok\\\"}\\n```" + `"}}]}`))
 	}))
 	defer server.Close()
 
-	client := New(server.URL, "", "first", "")
-	client.SetModel("second")
-	var result struct{}
-	if err := client.Structured(context.Background(), "s", "u", "n", map[string]any{}, &result); err != nil {
+	var result struct {
+		Value string `json:"value"`
+	}
+	if err := New(server.URL, "", "m", "").Structured(context.Background(), "s", "u", "n", map[string]any{}, &result); err != nil {
 		t.Fatal(err)
 	}
-	if seen != "second" {
-		t.Errorf("model = %q", seen)
+	if result.Value != "ok" {
+		t.Errorf("value = %q", result.Value)
 	}
 }
 

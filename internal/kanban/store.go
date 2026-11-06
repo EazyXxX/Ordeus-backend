@@ -56,8 +56,9 @@ type store struct {
 	pool *pgxpool.Pool
 }
 
-func (s *store) board(ctx context.Context) (Board, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text, title, color FROM kanban_columns ORDER BY position, id`)
+func (s *store) board(ctx context.Context, userID string) (Board, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id::text, title, color FROM kanban_columns WHERE user_id = $1 ORDER BY position, id`, userID)
 	if err != nil {
 		return Board{}, err
 	}
@@ -73,7 +74,8 @@ func (s *store) board(ctx context.Context) (Board, error) {
 		SELECT id::text, column_id::text, title, description, color, priority,
 			to_char(due_date, 'YYYY-MM-DD'), checklist, created_at, updated_at
 		FROM kanban_cards
-		ORDER BY position, id`)
+		WHERE user_id = $1
+		ORDER BY position, id`, userID)
 	if err != nil {
 		return Board{}, err
 	}
@@ -93,32 +95,33 @@ func (s *store) board(ctx context.Context) (Board, error) {
 	return Board{Columns: columns}, nil
 }
 
-func (s *store) createColumn(ctx context.Context, title string) (Column, error) {
+func (s *store) createColumn(ctx context.Context, userID, title string) (Column, error) {
 	column := Column{Title: title, Cards: []Card{}}
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO kanban_columns (title, position)
-		SELECT $1, COALESCE(MAX(position) + 1, 0) FROM kanban_columns
-		RETURNING id::text, color`, title).Scan(&column.ID, &column.Color)
+		INSERT INTO kanban_columns (user_id, title, position)
+		SELECT $1, $2, COALESCE(MAX(position) + 1, 0) FROM kanban_columns WHERE user_id = $1
+		RETURNING id::text, color`, userID, title).Scan(&column.ID, &column.Color)
 	return column, err
 }
 
 // updateColumn changes only the fields that are not nil.
-func (s *store) updateColumn(ctx context.Context, id string, title, color *string) error {
+func (s *store) updateColumn(ctx context.Context, userID, id string, title, color *string) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE kanban_columns
-		SET title = COALESCE($2, title), color = COALESCE($3, color)
-		WHERE id = $1`, id, title, color)
+		SET title = COALESCE($3, title), color = COALESCE($4, color)
+		WHERE id = $1 AND user_id = $2`, id, userID, title, color)
 	return requireRow(tag.RowsAffected(), err)
 }
 
-func (s *store) deleteColumn(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM kanban_columns WHERE id = $1`, id)
+func (s *store) deleteColumn(ctx context.Context, userID, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM kanban_columns WHERE id = $1 AND user_id = $2`, id, userID)
 	return requireRow(tag.RowsAffected(), err)
 }
 
-func (s *store) moveColumn(ctx context.Context, id string, index int) error {
+func (s *store) moveColumn(ctx context.Context, userID, id string, index int) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id::text FROM kanban_columns ORDER BY position, id FOR UPDATE`)
+		rows, err := tx.Query(ctx, `
+			SELECT id::text FROM kanban_columns WHERE user_id = $1 ORDER BY position, id FOR UPDATE`, userID)
 		if err != nil {
 			return err
 		}
@@ -137,42 +140,43 @@ func (s *store) moveColumn(ctx context.Context, id string, index int) error {
 	})
 }
 
-func (s *store) createCard(ctx context.Context, columnID, title string) (Card, error) {
+func (s *store) createCard(ctx context.Context, userID, columnID, title string) (Card, error) {
 	card := Card{ColumnID: columnID, Title: title, Priority: "none", Checklist: []ChecklistItem{}}
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if err := lockColumn(ctx, tx, columnID); err != nil {
+		if err := lockColumn(ctx, tx, userID, columnID); err != nil {
 			return err
 		}
 		return tx.QueryRow(ctx, `
-			INSERT INTO kanban_cards (column_id, title, position)
-			SELECT $1, $2, COALESCE(MAX(position) + 1, 0) FROM kanban_cards WHERE column_id = $1
-			RETURNING id::text, created_at, updated_at`, columnID, title,
+			INSERT INTO kanban_cards (user_id, column_id, title, position)
+			SELECT $1, $2, $3, COALESCE(MAX(position) + 1, 0) FROM kanban_cards WHERE column_id = $2
+			RETURNING id::text, created_at, updated_at`, userID, columnID, title,
 		).Scan(&card.ID, &card.CreatedAt, &card.UpdatedAt)
 	})
 	return card, err
 }
 
-func (s *store) updateCard(ctx context.Context, id string, input CardInput) error {
+func (s *store) updateCard(ctx context.Context, userID, id string, input CardInput) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE kanban_cards
-		SET title = $2, description = $3, color = $4, priority = $5, due_date = $6::date, checklist = $7
-		WHERE id = $1`,
-		id, input.Title, input.Description, input.Color, input.Priority, input.DueDate, input.Checklist)
+		SET title = $3, description = $4, color = $5, priority = $6, due_date = $7::date, checklist = $8
+		WHERE id = $1 AND user_id = $2`,
+		id, userID, input.Title, input.Description, input.Color, input.Priority, input.DueDate, input.Checklist)
 	return requireRow(tag.RowsAffected(), err)
 }
 
-func (s *store) deleteCard(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM kanban_cards WHERE id = $1`, id)
+func (s *store) deleteCard(ctx context.Context, userID, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM kanban_cards WHERE id = $1 AND user_id = $2`, id, userID)
 	return requireRow(tag.RowsAffected(), err)
 }
 
-func (s *store) moveCard(ctx context.Context, id, columnID string, index int) error {
+func (s *store) moveCard(ctx context.Context, userID, id, columnID string, index int) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if err := lockColumn(ctx, tx, columnID); err != nil {
+		if err := lockColumn(ctx, tx, userID, columnID); err != nil {
 			return err
 		}
 		var exists bool
-		err := tx.QueryRow(ctx, `SELECT true FROM kanban_cards WHERE id = $1 FOR UPDATE`, id).Scan(&exists)
+		err := tx.QueryRow(ctx,
+			`SELECT true FROM kanban_cards WHERE id = $1 AND user_id = $2 FOR UPDATE`, id, userID).Scan(&exists)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errNotFound
 		}
@@ -198,10 +202,12 @@ func (s *store) moveCard(ctx context.Context, id, columnID string, index int) er
 	})
 }
 
-// lockColumn serializes writes to one column's card order.
-func lockColumn(ctx context.Context, tx pgx.Tx, id string) error {
+// lockColumn serializes writes to one column's card order and confirms that the
+// column belongs to the account.
+func lockColumn(ctx context.Context, tx pgx.Tx, userID, id string) error {
 	var exists bool
-	err := tx.QueryRow(ctx, `SELECT true FROM kanban_columns WHERE id = $1 FOR UPDATE`, id).Scan(&exists)
+	err := tx.QueryRow(ctx,
+		`SELECT true FROM kanban_columns WHERE id = $1 AND user_id = $2 FOR UPDATE`, id, userID).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errNotFound
 	}

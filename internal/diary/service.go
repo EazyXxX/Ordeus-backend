@@ -19,17 +19,20 @@ const (
 	idlePollPeriod  = 30 * time.Second
 )
 
+// ModelFor returns the model an account chose for sorting its entries.
+type ModelFor func(ctx context.Context, userID string) (StructuredModel, error)
+
 type Service struct {
-	store *store
-	model structuredModel
-	wake  chan struct{}
+	store    *store
+	modelFor ModelFor
+	wake     chan struct{}
 }
 
-func New(pool *pgxpool.Pool, model structuredModel) *Service {
+func New(pool *pgxpool.Pool, modelFor ModelFor) *Service {
 	return &Service{
-		store: &store{pool: pool},
-		model: model,
-		wake:  make(chan struct{}, 1),
+		store:    &store{pool: pool},
+		modelFor: modelFor,
+		wake:     make(chan struct{}, 1),
 	}
 }
 
@@ -67,30 +70,34 @@ func (s *Service) processNext(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	known, err := s.store.organizerContext(ctx)
+	known, err := s.store.organizerContext(ctx, capture.userID)
 	if err != nil {
-		return s.fail(ctx, capture, err)
+		return s.fail(ctx, capture.id, err)
+	}
+	model, err := s.modelFor(ctx, capture.userID)
+	if err != nil {
+		return s.fail(ctx, capture.id, err)
 	}
 
 	organizeCtx, cancel := context.WithTimeout(ctx, organizeTimeout)
 	defer cancel()
-	result, err := organize(organizeCtx, s.model, capture.Text, known)
+	result, err := organize(organizeCtx, model, capture.text, capture.writtenOn, known)
 	if err != nil {
-		return s.fail(ctx, capture, err)
+		return s.fail(ctx, capture.id, err)
 	}
-	if err := s.store.applyPlan(ctx, capture.ID, result, known.Notes); err != nil {
-		return s.fail(ctx, capture, err)
+	if err := s.store.applyPlan(ctx, capture.userID, capture.id, result, known.Notes); err != nil {
+		return s.fail(ctx, capture.id, err)
 	}
-	slog.Info("capture organized", "id", capture.ID, "notes", len(result.Notes))
+	slog.Info("capture organized", "id", capture.id, "notes", len(result.Notes))
 	return nil
 }
 
 // fail records why a capture stopped so it can be retried. During shutdown the
 // capture stays as it is and returns to the queue on the next start.
-func (s *Service) fail(ctx context.Context, capture Capture, cause error) error {
+func (s *Service) fail(ctx context.Context, id string, cause error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	slog.Warn("capture failed", "id", capture.ID, "error", cause)
-	return s.store.failCapture(ctx, capture.ID, cause.Error())
+	slog.Warn("capture failed", "id", id, "error", cause)
+	return s.store.failCapture(ctx, id, cause.Error())
 }

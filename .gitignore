@@ -1,5 +1,6 @@
 .DS_Store
 .env
+.ordeus-secret
 *.log
 bin/
 tmp/

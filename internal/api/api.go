@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"ordeus/backend/internal/ai"
+	"ordeus/backend/internal/auth"
 	"ordeus/backend/internal/calendar"
 	"ordeus/backend/internal/diary"
 	"ordeus/backend/internal/httpjson"
@@ -19,14 +20,22 @@ import (
 
 const pingTimeout = 2 * time.Second
 
-func NewRouter(pool *pgxpool.Pool, diaryService *diary.Service, aiClient *ai.Client) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/health", health(pool))
-	kanban.Register(mux, pool)
-	calendar.Register(mux, pool)
-	diaryService.Register(mux)
-	ai.Register(mux, pool, aiClient)
-	return mux
+// NewRouter keeps sign-in and health public. Everything else needs a session,
+// so a new module is protected by registering on the protected mux.
+func NewRouter(pool *pgxpool.Pool, authService *auth.Service, kanbanService *kanban.Service, diaryService *diary.Service, aiRouter *ai.Router) http.Handler {
+	public := http.NewServeMux()
+	public.HandleFunc("GET /api/health", health(pool))
+	authService.RegisterPublic(public)
+
+	protected := http.NewServeMux()
+	authService.RegisterProtected(protected)
+	kanbanService.Register(protected)
+	calendar.Register(protected, pool)
+	diaryService.Register(protected)
+	aiRouter.Register(protected)
+
+	public.Handle("/api/", authService.Require(protected))
+	return public
 }
 
 func health(pool *pgxpool.Pool) http.HandlerFunc {

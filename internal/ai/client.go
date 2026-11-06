@@ -13,19 +13,21 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"sync/atomic"
 )
 
 const (
 	maxErrorBodyBytes     = 500
+	maxResponseBytes      = 16 << 20
 	structuredTemperature = 0.2
 	transcribePrompt      = "Расшифруй эту аудиозапись дословно на языке оригинала. Верни только текст речи, без комментариев."
 )
 
+// Client talks to one model at one address. Accounts choose their own, so
+// clients are built per use and hold no shared state.
 type Client struct {
 	baseURL string
 	apiKey  string
-	model   atomic.Pointer[string]
+	model   string
 	// reasoningEffort is omitted from requests when empty, because not every
 	// model accepts it.
 	reasoningEffort string
@@ -33,24 +35,13 @@ type Client struct {
 }
 
 func New(baseURL, apiKey, model, reasoningEffort string) *Client {
-	client := &Client{
+	return &Client{
 		baseURL:         strings.TrimRight(baseURL, "/"),
 		apiKey:          apiKey,
+		model:           model,
 		reasoningEffort: reasoningEffort,
 		http:            &http.Client{},
 	}
-	client.SetModel(model)
-	return client
-}
-
-// Model returns the model used for new requests.
-func (c *Client) Model() string {
-	return *c.model.Load()
-}
-
-// SetModel switches the model. A request already in flight keeps its model.
-func (c *Client) SetModel(model string) {
-	c.model.Store(&model)
 }
 
 // Models lists the models the provider offers, sorted by name.
@@ -75,7 +66,7 @@ func (c *Client) Models(ctx context.Context) ([]string, error) {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&list); err != nil {
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(&list); err != nil {
 		return nil, fmt.Errorf("decode models: %w", err)
 	}
 	models := make([]string, 0, len(list.Data))
@@ -152,7 +143,7 @@ func (c *Client) Structured(ctx context.Context, system, user, name string, sche
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal([]byte(content), target); err != nil {
+	if err := json.Unmarshal([]byte(stripCodeFence(content)), target); err != nil {
 		return fmt.Errorf("decode structured output: %w", err)
 	}
 	return nil
@@ -192,9 +183,27 @@ func (c *Client) transcribeChunk(ctx context.Context, pcm []byte) (string, error
 	})
 }
 
+// hideKey keeps the key out of error text that gets logged and stored.
+func (c *Client) hideKey(text string) string {
+	if c.apiKey == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, c.apiKey, "***")
+}
+
+// stripCodeFence removes the markdown fence some models put around JSON.
+func stripCodeFence(content string) string {
+	content = strings.TrimSpace(content)
+	if !strings.HasPrefix(content, "```") {
+		return content
+	}
+	_, content, _ = strings.Cut(content, "\n")
+	return strings.TrimSuffix(strings.TrimSpace(content), "```")
+}
+
 // complete sends a chat request with the current model and returns the answer.
 func (c *Client) complete(ctx context.Context, chat chatRequest) (string, error) {
-	chat.Model = c.Model()
+	chat.Model = c.model
 	chat.ReasoningEffort = c.reasoningEffort
 
 	body, err := json.Marshal(chat)
@@ -210,17 +219,17 @@ func (c *Client) complete(ctx context.Context, chat chatRequest) (string, error)
 
 	response, err := c.http.Do(request)
 	if err != nil {
-		return "", fmt.Errorf("model request: %w", err)
+		return "", fmt.Errorf("model request: %w", errors.New(c.hideKey(err.Error())))
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, maxErrorBodyBytes))
-		return "", fmt.Errorf("model returned %d: %s", response.StatusCode, detail)
+		return "", fmt.Errorf("model returned %d: %s", response.StatusCode, c.hideKey(string(detail)))
 	}
 
 	var answer chatResponse
-	if err := json.NewDecoder(response.Body).Decode(&answer); err != nil {
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(&answer); err != nil {
 		return "", fmt.Errorf("decode model response: %w", err)
 	}
 	if len(answer.Choices) == 0 {

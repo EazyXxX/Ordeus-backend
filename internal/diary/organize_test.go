@@ -61,6 +61,72 @@ func TestNormalizePlanFixesReferences(t *testing.T) {
 	}
 }
 
+func TestNormalizePlanKeepsExactTextOfSingleNote(t *testing.T) {
+	raw := plan{Notes: []plannedNote{{Title: "Планы", Body: "Хочу выучить испанский кr лету"}}}
+
+	got := normalizePlan(raw, " Хочу выучить испанский к лету ", 0)
+
+	if body := got.Notes[0].Body; body != "Хочу выучить испанский к лету" {
+		t.Errorf("body = %q", body)
+	}
+}
+
+func TestNormalizePlanKeepsBodiesOfSplitNotes(t *testing.T) {
+	raw := plan{Notes: []plannedNote{{Body: "первая"}, {Body: "вторая"}}}
+
+	got := normalizePlan(raw, "Раздели на заметки. первая вторая", 0)
+
+	if got.Notes[0].Body != "первая" || got.Notes[1].Body != "вторая" {
+		t.Errorf("notes = %+v", got.Notes)
+	}
+}
+
+func TestOrganizerPromptSplitsOnlyOnRequest(t *testing.T) {
+	for _, rule := range []string{"По умолчанию вся запись становится одной заметкой", "автор прямо просит"} {
+		if !strings.Contains(organizerPrompt, rule) {
+			t.Errorf("prompt lacks %q", rule)
+		}
+	}
+}
+
+func TestApplyEntryTextTakesHeadingFromFirstLine(t *testing.T) {
+	tests := []struct {
+		name, title, text, wantTitle, wantBody string
+	}{
+		{"exact copy", "Рецепт пирога", "Рецепт пирога\nПробовал новый рецепт.", "Рецепт пирога", "Пробовал новый рецепт."},
+		{"keeps author spelling", "рецепт ПИРОГА", "Рецепт пирога:\n\nТекст.", "Рецепт пирога:", "Текст."},
+		{"markdown heading", "План на неделю", "# План на неделю\nТекст", "# План на неделю", "Текст"},
+		{"model made its own title", "Удачный пирог", "Рецепт пирога\nТекст.", "Удачный пирог", "Рецепт пирога\nТекст."},
+		{"single line stays body", "Купить молоко", "Купить молоко", "Купить молоко", "Купить молоко"},
+		{"heading without text", "Заметка", "Заметка\n   ", "Заметка", "Заметка"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := applyEntryText(plannedNote{Title: tt.title}, tt.text)
+			if got.Title != tt.wantTitle || got.Body != tt.wantBody {
+				t.Errorf("got %q / %q, want %q / %q", got.Title, got.Body, tt.wantTitle, tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestWithValidDailyDates(t *testing.T) {
+	const today = "2026-11-06"
+	for date, want := range map[string]string{
+		"":             "",
+		"2026-11-06":   "2026-11-06",
+		" 2026-11-05 ": "2026-11-05",
+		"2026-11-07":   "",
+		"сегодня":      "",
+		"2026-02-30":   "",
+	} {
+		got := withValidDailyDates([]plannedNote{{DailyDate: date}}, today)[0].DailyDate
+		if got != want {
+			t.Errorf("%q = %q, want %q", date, got, want)
+		}
+	}
+}
+
 func TestNormalizePlanLimitsNotes(t *testing.T) {
 	raw := plan{}
 	for range maxPlannedNotes + 3 {
@@ -72,12 +138,18 @@ func TestNormalizePlanLimitsNotes(t *testing.T) {
 }
 
 func TestBuildPromptIncludesContext(t *testing.T) {
-	prompt := buildPrompt("запись", organizerContext{
+	prompt := buildPrompt("запись", "2026-11-06", organizerContext{
 		Folders: []string{"Работа"},
 		Tags:    []string{"идея"},
 		Notes:   []NoteRef{{ID: "1", Title: "Старая заметка"}},
 	})
-	for _, part := range []string{"Работа", "идея", "1. Старая заметка", "<entry>\nзапись\n</entry>"} {
+	for _, part := range []string{
+		"Сегодня: 2026-11-06, пятница",
+		"2026-11-05 — четверг, вчера",
+		"2026-11-04 — среда, позавчера",
+		"Работа", "идея", "1. Старая заметка",
+		"<entry>\nзапись\n</entry>",
+	} {
 		if !strings.Contains(prompt, part) {
 			t.Errorf("prompt lacks %q:\n%s", part, prompt)
 		}
@@ -91,7 +163,7 @@ func (failingModel) Structured(context.Context, string, string, string, any, any
 }
 
 func TestOrganizeReportsModelFailure(t *testing.T) {
-	if _, err := organize(context.Background(), failingModel{}, "текст", organizerContext{}); err == nil {
+	if _, err := organize(context.Background(), failingModel{}, "текст", "2026-11-06", organizerContext{}); err == nil {
 		t.Fatal("expected an error")
 	}
 }

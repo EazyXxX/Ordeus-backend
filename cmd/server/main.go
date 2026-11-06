@@ -12,9 +12,11 @@ import (
 
 	"ordeus/backend/internal/ai"
 	"ordeus/backend/internal/api"
+	"ordeus/backend/internal/auth"
 	"ordeus/backend/internal/config"
 	"ordeus/backend/internal/database"
 	"ordeus/backend/internal/diary"
+	"ordeus/backend/internal/kanban"
 )
 
 const (
@@ -43,16 +45,41 @@ func run() error {
 	}
 	defer pool.Close()
 
-	aiClient := ai.New(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel, cfg.AIReasoningEffort)
-	if err := ai.RestoreModel(startupCtx, pool, aiClient); err != nil {
+	aiRouter, err := ai.NewRouter(pool, ai.RouterConfig{
+		LocalBaseURL:         cfg.AIBaseURL,
+		LocalAPIKey:          cfg.AIAPIKey,
+		LocalModel:           cfg.AIModel,
+		LocalReasoningEffort: cfg.AIReasoningEffort,
+		SecretFile:           cfg.SecretFile,
+		AllowPrivateURLs:     cfg.AIAllowPrivateURLs,
+	})
+	if err != nil {
 		return err
 	}
-	diaryService := diary.New(pool, aiClient)
+	authService := auth.New(pool, cfg.SecureCookies)
+	if err := authService.CleanExpired(startupCtx); err != nil {
+		return err
+	}
+	diaryService := diary.New(pool, func(ctx context.Context, userID string) (diary.StructuredModel, error) {
+		client, err := aiRouter.ForUser(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		return client, nil
+	})
 	go diaryService.Run(ctx)
+	kanbanService := kanban.New(pool, func(ctx context.Context, userID string) (kanban.StructuredModel, error) {
+		client, err := aiRouter.ForUser(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		return client, nil
+	})
+	go kanbanService.Run(ctx)
 
 	server := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           api.NewRouter(pool, diaryService, aiClient),
+		Handler:           api.NewRouter(pool, authService, kanbanService, diaryService, aiRouter),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

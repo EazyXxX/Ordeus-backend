@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
 
+	"ordeus/backend/internal/auth"
 	"ordeus/backend/internal/httpjson"
 	"ordeus/backend/internal/kanban"
 )
@@ -32,6 +34,7 @@ func (s *Service) Register(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /api/diary/tags", s.listTags)
 	mux.HandleFunc("PATCH /api/diary/tags/{id}", s.updateTag)
+	mux.HandleFunc("DELETE /api/diary/tags/{id}", s.deleteTag)
 
 	mux.HandleFunc("GET /api/diary/captures", s.listCaptures)
 	mux.HandleFunc("POST /api/diary/captures", s.createCapture)
@@ -42,6 +45,7 @@ func (s *Service) Register(mux *http.ServeMux) {
 func (s *Service) listNotes(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	filter := NoteFilter{
+		Daily:    query.Get("daily") == "true",
 		FolderID: query.Get("folder"),
 		Tag:      query.Get("tag"),
 		Query:    strings.TrimSpace(query.Get("q")),
@@ -50,7 +54,7 @@ func (s *Service) listNotes(w http.ResponseWriter, r *http.Request) {
 		httpjson.Error(w, http.StatusBadRequest, "invalid folder")
 		return
 	}
-	notes, err := s.store.notes(r.Context(), filter)
+	notes, err := s.store.notes(r.Context(), auth.UserID(r.Context()), filter)
 	respond(w, r, notes, err)
 }
 
@@ -59,7 +63,7 @@ func (s *Service) createNote(w http.ResponseWriter, r *http.Request) {
 	if !httpjson.Bind(w, r, &input) || !validNote(w, &input) {
 		return
 	}
-	id, err := s.store.createNote(r.Context(), input)
+	id, err := s.store.createNote(r.Context(), auth.UserID(r.Context()), input)
 	if err != nil {
 		fail(w, r, err)
 		return
@@ -73,17 +77,17 @@ func (s *Service) updateNote(w http.ResponseWriter, r *http.Request) {
 	if !ok || !httpjson.Bind(w, r, &input) || !validNote(w, &input) {
 		return
 	}
-	finish(w, r, s.store.updateNote(r.Context(), id, input))
+	finish(w, r, s.store.updateNote(r.Context(), auth.UserID(r.Context()), id, input))
 }
 
 func (s *Service) deleteNote(w http.ResponseWriter, r *http.Request) {
 	if id, ok := httpjson.PathID(w, r); ok {
-		finish(w, r, s.store.deleteNote(r.Context(), id))
+		finish(w, r, s.store.deleteNote(r.Context(), auth.UserID(r.Context()), id))
 	}
 }
 
 func (s *Service) listFolders(w http.ResponseWriter, r *http.Request) {
-	folders, err := s.store.folders(r.Context())
+	folders, err := s.store.folders(r.Context(), auth.UserID(r.Context()))
 	respond(w, r, folders, err)
 }
 
@@ -106,17 +110,17 @@ func (s *Service) updateFolder(w http.ResponseWriter, r *http.Request) {
 	if input.Color != nil && !validColor(w, *input.Color) {
 		return
 	}
-	finish(w, r, s.store.updateFolder(r.Context(), id, input.Name, input.Color))
+	finish(w, r, s.store.updateFolder(r.Context(), auth.UserID(r.Context()), id, input.Name, input.Color))
 }
 
 func (s *Service) deleteFolder(w http.ResponseWriter, r *http.Request) {
 	if id, ok := httpjson.PathID(w, r); ok {
-		finish(w, r, s.store.deleteFolder(r.Context(), id))
+		finish(w, r, s.store.deleteFolder(r.Context(), auth.UserID(r.Context()), id))
 	}
 }
 
 func (s *Service) listTags(w http.ResponseWriter, r *http.Request) {
-	tags, err := s.store.tags(r.Context())
+	tags, err := s.store.tags(r.Context(), auth.UserID(r.Context()))
 	respond(w, r, tags, err)
 }
 
@@ -128,19 +132,30 @@ func (s *Service) updateTag(w http.ResponseWriter, r *http.Request) {
 	if !ok || !httpjson.Bind(w, r, &input) || !validColor(w, input.Color) {
 		return
 	}
-	finish(w, r, s.store.updateTagColor(r.Context(), id, input.Color))
+	finish(w, r, s.store.updateTagColor(r.Context(), auth.UserID(r.Context()), id, input.Color))
+}
+
+func (s *Service) deleteTag(w http.ResponseWriter, r *http.Request) {
+	if id, ok := httpjson.PathID(w, r); ok {
+		finish(w, r, s.store.deleteTag(r.Context(), auth.UserID(r.Context()), id))
+	}
 }
 
 func (s *Service) listCaptures(w http.ResponseWriter, r *http.Request) {
-	captures, err := s.store.unfinishedCaptures(r.Context())
+	captures, err := s.store.unfinishedCaptures(r.Context(), auth.UserID(r.Context()))
 	respond(w, r, captures, err)
 }
 
 func (s *Service) createCapture(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Text string `json:"text"`
+		Text  string `json:"text"`
+		Today string `json:"today"`
 	}
 	if !httpjson.Bind(w, r, &input) {
+		return
+	}
+	if _, err := time.Parse(time.DateOnly, input.Today); err != nil {
+		httpjson.Error(w, http.StatusBadRequest, "invalid date")
 		return
 	}
 	input.Text = strings.TrimSpace(input.Text)
@@ -148,7 +163,7 @@ func (s *Service) createCapture(w http.ResponseWriter, r *http.Request) {
 		httpjson.Error(w, http.StatusBadRequest, "text must be 1 to 50000 characters long")
 		return
 	}
-	capture, err := s.store.createCapture(r.Context(), input.Text)
+	capture, err := s.store.createCapture(r.Context(), auth.UserID(r.Context()), input.Text, input.Today)
 	if err != nil {
 		fail(w, r, err)
 		return
@@ -162,7 +177,7 @@ func (s *Service) retryCapture(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	err := s.store.retryCapture(r.Context(), id)
+	err := s.store.retryCapture(r.Context(), auth.UserID(r.Context()), id)
 	if err == nil {
 		s.notifyWorker()
 	}
@@ -171,8 +186,13 @@ func (s *Service) retryCapture(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) deleteCapture(w http.ResponseWriter, r *http.Request) {
 	if id, ok := httpjson.PathID(w, r); ok {
-		finish(w, r, s.store.deleteFailedCapture(r.Context(), id))
+		finish(w, r, s.store.deleteFailedCapture(r.Context(), auth.UserID(r.Context()), id))
 	}
+}
+
+func validDate(date string) bool {
+	_, err := time.Parse(time.DateOnly, date)
+	return err == nil
 }
 
 func validColor(w http.ResponseWriter, color string) bool {
@@ -196,6 +216,8 @@ func validNote(w http.ResponseWriter, input *NoteInput) bool {
 		httpjson.Error(w, http.StatusBadRequest, "body is too long")
 	case utf8.RuneCountInString(input.Folder) > maxTitleLength:
 		httpjson.Error(w, http.StatusBadRequest, "folder name is too long")
+	case input.DailyDate != nil && !validDate(*input.DailyDate):
+		httpjson.Error(w, http.StatusBadRequest, "invalid daily date")
 	case slices.ContainsFunc(input.LinkIDs, func(id string) bool { return uuid.Validate(id) != nil }):
 		httpjson.Error(w, http.StatusBadRequest, "invalid link id")
 	default:

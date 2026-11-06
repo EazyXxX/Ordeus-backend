@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"ordeus/backend/internal/auth"
 	"ordeus/backend/internal/httpjson"
 	"ordeus/backend/internal/kanban"
 )
@@ -42,7 +43,7 @@ func (h *handler) getRange(w http.ResponseWriter, r *http.Request) {
 		httpjson.Error(w, http.StatusBadRequest, problem)
 		return
 	}
-	result, err := h.store.inRange(r.Context(), from, to)
+	result, err := h.store.inRange(r.Context(), auth.UserID(r.Context()), from, to)
 	if err != nil {
 		fail(w, r, err)
 		return
@@ -55,7 +56,7 @@ func (h *handler) createNote(w http.ResponseWriter, r *http.Request) {
 	if !httpjson.Bind(w, r, &input) || !validNote(w, &input) {
 		return
 	}
-	id, err := h.store.createNote(r.Context(), input)
+	id, err := h.store.createNote(r.Context(), auth.UserID(r.Context()), input)
 	if err != nil {
 		fail(w, r, err)
 		return
@@ -69,12 +70,12 @@ func (h *handler) updateNote(w http.ResponseWriter, r *http.Request) {
 	if !ok || !httpjson.Bind(w, r, &input) || !validNote(w, &input) {
 		return
 	}
-	finish(w, r, h.store.updateNote(r.Context(), id, input))
+	finish(w, r, h.store.updateNote(r.Context(), auth.UserID(r.Context()), id, input))
 }
 
 func (h *handler) deleteNote(w http.ResponseWriter, r *http.Request) {
 	if id, ok := httpjson.PathID(w, r); ok {
-		finish(w, r, h.store.deleteNote(r.Context(), id))
+		finish(w, r, h.store.deleteNote(r.Context(), auth.UserID(r.Context()), id))
 	}
 }
 

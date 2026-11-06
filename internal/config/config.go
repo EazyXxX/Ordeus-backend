@@ -8,6 +8,7 @@ const (
 	defaultDatabaseURL = "postgres://ordeus:ordeus@127.0.0.1:5432/ordeus?sslmode=disable"
 	defaultAIBaseURL   = "http://127.0.0.1:11434/v1"
 	defaultAIModel     = "gemma4:12b"
+	defaultSecretFile  = ".ordeus-secret"
 	// Local reasoning models can spend minutes thinking and return no answer.
 	localReasoningEffort = "none"
 )
@@ -20,6 +21,13 @@ type Config struct {
 	AIModel     string
 	// AIReasoningEffort is left out of requests when empty.
 	AIReasoningEffort string
+	// AIAllowPrivateURLs lets accounts use model servers on a private network.
+	// Leave it off when the app is open to people you do not trust.
+	AIAllowPrivateURLs bool
+	// SecretFile holds the key that encrypts vendor API keys.
+	SecretFile string
+	// SecureCookies must be on whenever the app is served over HTTPS.
+	SecureCookies bool
 }
 
 func Load() Config {
@@ -30,12 +38,15 @@ func Load() Config {
 	}
 
 	return Config{
-		Addr:              env("ORDEUS_ADDR", defaultAddr),
-		DatabaseURL:       env("ORDEUS_DATABASE_URL", defaultDatabaseURL),
-		AIBaseURL:         baseURL,
-		AIAPIKey:          os.Getenv("ORDEUS_AI_API_KEY"),
-		AIModel:           env("ORDEUS_AI_MODEL", defaultAIModel),
-		AIReasoningEffort: reasoningEffort,
+		Addr:               env("ORDEUS_ADDR", defaultAddr),
+		DatabaseURL:        env("ORDEUS_DATABASE_URL", defaultDatabaseURL),
+		AIBaseURL:          baseURL,
+		AIAPIKey:           os.Getenv("ORDEUS_AI_API_KEY"),
+		AIModel:            env("ORDEUS_AI_MODEL", defaultAIModel),
+		AIReasoningEffort:  reasoningEffort,
+		SecureCookies:      os.Getenv("ORDEUS_SECURE_COOKIES") == "true",
+		AIAllowPrivateURLs: os.Getenv("ORDEUS_AI_ALLOW_PRIVATE_URLS") == "true",
+		SecretFile:         env("ORDEUS_SECRET_FILE", defaultSecretFile),
 	}
 }
 

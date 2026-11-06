@@ -11,8 +11,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 
+	"ordeus/backend/internal/auth"
 	"ordeus/backend/internal/httpjson"
 )
 
@@ -32,9 +32,14 @@ type handler struct {
 	store *store
 }
 
-func Register(mux *http.ServeMux, pool *pgxpool.Pool) {
-	h := &handler{store: &store{pool: pool}}
+// Register adds the board routes.
+func (s *Service) Register(mux *http.ServeMux) {
+	h := &handler{store: s.store}
 
+	mux.HandleFunc("GET /api/kanban/captures", s.listCaptures)
+	mux.HandleFunc("POST /api/kanban/captures", s.createCapture)
+	mux.HandleFunc("POST /api/kanban/captures/{id}/retry", s.retryCapture)
+	mux.HandleFunc("DELETE /api/kanban/captures/{id}", s.deleteCapture)
 	mux.HandleFunc("GET /api/kanban/board", h.getBoard)
 	mux.HandleFunc("POST /api/kanban/columns", h.createColumn)
 	mux.HandleFunc("PATCH /api/kanban/columns/{id}", h.updateColumn)
@@ -47,7 +52,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool) {
 }
 
 func (h *handler) getBoard(w http.ResponseWriter, r *http.Request) {
-	board, err := h.store.board(r.Context())
+	board, err := h.store.board(r.Context(), auth.UserID(r.Context()))
 	if err != nil {
 		fail(w, r, err)
 		return
@@ -62,7 +67,7 @@ func (h *handler) createColumn(w http.ResponseWriter, r *http.Request) {
 	if !httpjson.Bind(w, r, &input) || !validTitle(w, &input.Title) {
 		return
 	}
-	column, err := h.store.createColumn(r.Context(), input.Title)
+	column, err := h.store.createColumn(r.Context(), auth.UserID(r.Context()), input.Title)
 	if err != nil {
 		fail(w, r, err)
 		return
@@ -86,12 +91,12 @@ func (h *handler) updateColumn(w http.ResponseWriter, r *http.Request) {
 		httpjson.Error(w, http.StatusBadRequest, "unknown color")
 		return
 	}
-	finish(w, r, h.store.updateColumn(r.Context(), id, input.Title, input.Color))
+	finish(w, r, h.store.updateColumn(r.Context(), auth.UserID(r.Context()), id, input.Title, input.Color))
 }
 
 func (h *handler) deleteColumn(w http.ResponseWriter, r *http.Request) {
 	if id, ok := httpjson.PathID(w, r); ok {
-		finish(w, r, h.store.deleteColumn(r.Context(), id))
+		finish(w, r, h.store.deleteColumn(r.Context(), auth.UserID(r.Context()), id))
 	}
 }
 
@@ -103,7 +108,7 @@ func (h *handler) moveColumn(w http.ResponseWriter, r *http.Request) {
 	if !ok || !httpjson.Bind(w, r, &input) {
 		return
 	}
-	finish(w, r, h.store.moveColumn(r.Context(), id, input.Index))
+	finish(w, r, h.store.moveColumn(r.Context(), auth.UserID(r.Context()), id, input.Index))
 }
 
 func (h *handler) createCard(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +119,7 @@ func (h *handler) createCard(w http.ResponseWriter, r *http.Request) {
 	if !httpjson.Bind(w, r, &input) || !validID(w, input.ColumnID) || !validTitle(w, &input.Title) {
 		return
 	}
-	card, err := h.store.createCard(r.Context(), input.ColumnID, input.Title)
+	card, err := h.store.createCard(r.Context(), auth.UserID(r.Context()), input.ColumnID, input.Title)
 	if err != nil {
 		fail(w, r, err)
 		return
@@ -128,12 +133,12 @@ func (h *handler) updateCard(w http.ResponseWriter, r *http.Request) {
 	if !ok || !httpjson.Bind(w, r, &input) || !validCard(w, &input) {
 		return
 	}
-	finish(w, r, h.store.updateCard(r.Context(), id, input))
+	finish(w, r, h.store.updateCard(r.Context(), auth.UserID(r.Context()), id, input))
 }
 
 func (h *handler) deleteCard(w http.ResponseWriter, r *http.Request) {
 	if id, ok := httpjson.PathID(w, r); ok {
-		finish(w, r, h.store.deleteCard(r.Context(), id))
+		finish(w, r, h.store.deleteCard(r.Context(), auth.UserID(r.Context()), id))
 	}
 }
 
@@ -146,7 +151,7 @@ func (h *handler) moveCard(w http.ResponseWriter, r *http.Request) {
 	if !ok || !httpjson.Bind(w, r, &input) || !validID(w, input.ColumnID) {
 		return
 	}
-	finish(w, r, h.store.moveCard(r.Context(), id, input.ColumnID, input.Index))
+	finish(w, r, h.store.moveCard(r.Context(), auth.UserID(r.Context()), id, input.ColumnID, input.Index))
 }
 
 func validID(w http.ResponseWriter, id string) bool {
