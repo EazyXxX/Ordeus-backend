@@ -49,9 +49,15 @@ func (s *Service) listNotes(w http.ResponseWriter, r *http.Request) {
 		FolderID: query.Get("folder"),
 		Tag:      query.Get("tag"),
 		Query:    strings.TrimSpace(query.Get("q")),
+		From:     query.Get("from"),
+		To:       query.Get("to"),
 	}
 	if filter.FolderID != "" && uuid.Validate(filter.FolderID) != nil {
 		httpjson.Error(w, http.StatusBadRequest, "invalid folder")
+		return
+	}
+	if (filter.From != "" && !validDate(filter.From)) || (filter.To != "" && !validDate(filter.To)) {
+		httpjson.Error(w, http.StatusBadRequest, "invalid date")
 		return
 	}
 	notes, err := s.store.notes(r.Context(), auth.UserID(r.Context()), filter)
@@ -95,6 +101,7 @@ func (s *Service) updateFolder(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Name  *string `json:"name"`
 		Color *string `json:"color"`
+		Emoji *string `json:"emoji"`
 	}
 	id, ok := httpjson.PathID(w, r)
 	if !ok || !httpjson.Bind(w, r, &input) {
@@ -110,7 +117,10 @@ func (s *Service) updateFolder(w http.ResponseWriter, r *http.Request) {
 	if input.Color != nil && !validColor(w, *input.Color) {
 		return
 	}
-	finish(w, r, s.store.updateFolder(r.Context(), auth.UserID(r.Context()), id, input.Name, input.Color))
+	if !validEmojiChoice(w, input.Emoji) {
+		return
+	}
+	finish(w, r, s.store.updateFolder(r.Context(), auth.UserID(r.Context()), id, input.Name, input.Color, input.Emoji))
 }
 
 func (s *Service) deleteFolder(w http.ResponseWriter, r *http.Request) {
@@ -126,13 +136,17 @@ func (s *Service) listTags(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) updateTag(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Color string `json:"color"`
+		Color *string `json:"color"`
+		Emoji *string `json:"emoji"`
 	}
 	id, ok := httpjson.PathID(w, r)
-	if !ok || !httpjson.Bind(w, r, &input) || !validColor(w, input.Color) {
+	if !ok || !httpjson.Bind(w, r, &input) {
 		return
 	}
-	finish(w, r, s.store.updateTagColor(r.Context(), auth.UserID(r.Context()), id, input.Color))
+	if (input.Color != nil && !validColor(w, *input.Color)) || !validEmojiChoice(w, input.Emoji) {
+		return
+	}
+	finish(w, r, s.store.updateTag(r.Context(), auth.UserID(r.Context()), id, input.Color, input.Emoji))
 }
 
 func (s *Service) deleteTag(w http.ResponseWriter, r *http.Request) {
@@ -193,6 +207,15 @@ func (s *Service) deleteCapture(w http.ResponseWriter, r *http.Request) {
 func validDate(date string) bool {
 	_, err := time.Parse(time.DateOnly, date)
 	return err == nil
+}
+
+// validEmojiChoice allows an empty emoji, which removes the current one.
+func validEmojiChoice(w http.ResponseWriter, emoji *string) bool {
+	if emoji == nil || *emoji == "" || validEmoji(*emoji) {
+		return true
+	}
+	httpjson.Error(w, http.StatusBadRequest, "invalid emoji")
+	return false
 }
 
 func validColor(w http.ResponseWriter, color string) bool {

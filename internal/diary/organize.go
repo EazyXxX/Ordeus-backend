@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"ordeus/backend/internal/kanban"
@@ -18,6 +19,8 @@ const (
 	maxTagLength     = 50
 	derivedTitleLen  = 60
 	pastDaysInPrompt = 7
+	// Long enough for a family or a flag, which join several code points.
+	maxEmojiRunes = 16
 )
 
 const organizerPrompt = `Ты ведёшь личный дневник автора, устроенный как Zettelkasten.
@@ -34,6 +37,9 @@ const organizerPrompt = `Ты ведёшь личный дневник авто�
 - Автор может сам задать заголовок первой строкой: это отдельная короткая строка без подробностей, а основной текст идёт со следующей строки. В таком случае скопируй эту строку в title дословно, ничего не меняя. Первая строка, которая уже является частью рассказа, заголовком не считается: тогда придумай title сам.
 - folder — название папки. Выбирай из существующих, если подходит. Новую создавай, только если ни одна не подходит. Название общее, из одного-двух слов.
 - tags — от 1 до 5 тегов строчными буквами. Каждая тема записи должна получить свой тег, поэтому в записи на несколько тем будет несколько тегов. Бери существующий тег, если он подходит по смыслу, иначе создай новый.
+- В названиях папок и тегов эмодзи не используй, для них есть отдельные поля.
+- folder_emoji — один эмодзи, подходящий по смыслу папке, например 💼 для папки «Работа». Заполняй всегда.
+- tag_emojis — по одному эмодзи для каждого тега из tags: в поле tag название тега, в поле emoji сам эмодзи.
 - related_existing — номера существующих заметок, по-настоящему связанных с этой по смыслу. Если таких нет, пустой список.
 - related_new — индексы (с нуля) других заметок из твоего ответа, связанных с этой. Если заметка одна, пустой список.
 
@@ -48,13 +54,20 @@ type plan struct {
 }
 
 type plannedNote struct {
-	Title           string   `json:"title"`
-	Body            string   `json:"body"`
-	Folder          string   `json:"folder"`
-	Tags            []string `json:"tags"`
-	RelatedExisting []int    `json:"related_existing"`
-	RelatedNew      []int    `json:"related_new"`
-	DailyDate       string   `json:"daily_date"`
+	Title           string     `json:"title"`
+	Body            string     `json:"body"`
+	Folder          string     `json:"folder"`
+	Tags            []string   `json:"tags"`
+	RelatedExisting []int      `json:"related_existing"`
+	RelatedNew      []int      `json:"related_new"`
+	DailyDate       string     `json:"daily_date"`
+	FolderEmoji     string     `json:"folder_emoji"`
+	TagEmojis       []tagEmoji `json:"tag_emojis"`
+}
+
+type tagEmoji struct {
+	Tag   string `json:"tag"`
+	Emoji string `json:"emoji"`
 }
 
 var planSchema = map[string]any{
@@ -72,8 +85,24 @@ var planSchema = map[string]any{
 					"related_existing": stringArray("integer"),
 					"related_new":      stringArray("integer"),
 					"daily_date":       map[string]any{"type": "string"},
+					"folder_emoji":     map[string]any{"type": "string"},
+					"tag_emojis": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"tag":   map[string]any{"type": "string"},
+								"emoji": map[string]any{"type": "string"},
+							},
+							"required":             []string{"tag", "emoji"},
+							"additionalProperties": false,
+						},
+					},
 				},
-				"required":             []string{"title", "body", "folder", "tags", "related_existing", "related_new", "daily_date"},
+				"required": []string{
+					"title", "body", "folder", "tags", "related_existing", "related_new", "daily_date",
+					"folder_emoji", "tag_emojis",
+				},
 				"additionalProperties": false,
 			},
 		},
@@ -225,6 +254,11 @@ func cleanNote(note plannedNote, newIndex map[int]int, knownNotes int) plannedNo
 	if len(note.Tags) > maxNoteTags {
 		note.Tags = note.Tags[:maxNoteTags]
 	}
+	note.FolderEmoji = strings.TrimSpace(note.FolderEmoji)
+	if !validEmoji(note.FolderEmoji) {
+		note.FolderEmoji = ""
+	}
+	note.TagEmojis = cleanTagEmojis(note.TagEmojis, note.Tags)
 
 	existing := make([]int, 0, len(note.RelatedExisting))
 	for _, number := range note.RelatedExisting {
@@ -257,6 +291,46 @@ func normalizeTags(tags []string) []string {
 		}
 	}
 	return result
+}
+
+// cleanTagEmojis keeps valid emojis of the note's own tags, one per tag.
+func cleanTagEmojis(emojis []tagEmoji, tags []string) []tagEmoji {
+	result := make([]tagEmoji, 0, len(emojis))
+	for _, item := range emojis {
+		names := normalizeTags([]string{item.Tag})
+		emoji := strings.TrimSpace(item.Emoji)
+		if len(names) == 0 || !slices.Contains(tags, names[0]) || !validEmoji(emoji) {
+			continue
+		}
+		seen := slices.ContainsFunc(result, func(other tagEmoji) bool { return other.Tag == names[0] })
+		if !seen {
+			result = append(result, tagEmoji{Tag: names[0], Emoji: emoji})
+		}
+	}
+	return result
+}
+
+// validEmoji accepts symbols and the code points that join them, so neither a
+// model nor a client can store plain text as an emoji.
+func validEmoji(text string) bool {
+	if text == "" || utf8.RuneCountInString(text) > maxEmojiRunes {
+		return false
+	}
+	if key, keycap := strings.CutSuffix(text, "\uFE0F\u20E3"); keycap {
+		return len(key) == 1 && strings.Contains("0123456789#*", key)
+	}
+	hasSymbol := false
+	for _, r := range text {
+		switch {
+		// Some emojis, such as ↔️ and ℹ️, are classed as math or letters in Unicode.
+		case unicode.Is(unicode.So, r), r >= 0x203C && r <= 0x2BFF, r == 0x3030, r == 0x303D, r >= 0x1F000 && r <= 0x1FFFF:
+			hasSymbol = true
+		case r == 0x200D, r == 0xFE0F, r >= 0xE0020 && r <= 0xE007F:
+		default:
+			return false
+		}
+	}
+	return hasSymbol
 }
 
 func deriveTitle(body string) string {

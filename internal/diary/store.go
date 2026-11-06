@@ -46,6 +46,7 @@ type Folder struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Color string `json:"color"`
+	Emoji string `json:"emoji"`
 	Notes int    `json:"notes"`
 }
 
@@ -53,6 +54,7 @@ type Tag struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Color string `json:"color"`
+	Emoji string `json:"emoji"`
 	Notes int    `json:"notes"`
 }
 
@@ -69,6 +71,9 @@ type NoteFilter struct {
 	FolderID string
 	Tag      string
 	Query    string
+	// From and To bound the day a daily note describes, both inclusive.
+	From string
+	To   string
 }
 
 type NoteInput struct {
@@ -105,6 +110,8 @@ func (s *store) notes(ctx context.Context, userID string, filter NoteFilter) ([]
 		LEFT JOIN diary_folders f ON f.id = n.folder_id
 		WHERE n.user_id = $5
 			AND (NOT $6 OR n.daily_date IS NOT NULL)
+			AND (NULLIF($7, '') IS NULL OR n.daily_date >= NULLIF($7, '')::date)
+			AND (NULLIF($8, '') IS NULL OR n.daily_date <= NULLIF($8, '')::date)
 			AND (NULLIF($1, '') IS NULL OR n.folder_id = NULLIF($1, '')::uuid)
 			AND ($2 = '' OR EXISTS (
 				SELECT 1 FROM diary_note_tags nt JOIN diary_tags t ON t.id = nt.tag_id
@@ -112,7 +119,7 @@ func (s *store) notes(ctx context.Context, userID string, filter NoteFilter) ([]
 			))
 			AND ($3 = '' OR strpos(lower(n.title || ' ' || n.body), lower($3)) > 0)
 		ORDER BY CASE WHEN $6 THEN n.daily_date END DESC, n.id DESC
-		LIMIT $4`, filter.FolderID, filter.Tag, filter.Query, listLimit, userID, filter.Daily)
+		LIMIT $4`, filter.FolderID, filter.Tag, filter.Query, listLimit, userID, filter.Daily, filter.From, filter.To)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +133,7 @@ func (s *store) notes(ctx context.Context, userID string, filter NoteFilter) ([]
 
 func (s *store) folders(ctx context.Context, userID string) ([]Folder, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT f.id::text, f.name, f.color, count(n.id)::int
+		SELECT f.id::text, f.name, f.color, COALESCE(f.emoji, ''), count(n.id)::int
 		FROM diary_folders f
 		LEFT JOIN diary_notes n ON n.folder_id = f.id
 		WHERE f.user_id = $1
@@ -140,7 +147,7 @@ func (s *store) folders(ctx context.Context, userID string) ([]Folder, error) {
 
 func (s *store) tags(ctx context.Context, userID string) ([]Tag, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT t.id::text, t.name, t.color, count(*)::int
+		SELECT t.id::text, t.name, t.color, COALESCE(t.emoji, ''), count(*)::int
 		FROM diary_tags t
 		JOIN diary_note_tags nt ON nt.tag_id = t.id
 		WHERE t.user_id = $1
@@ -204,11 +211,11 @@ func (s *store) deleteNote(ctx context.Context, userID, id string) error {
 }
 
 // updateFolder changes only the fields that are not nil.
-func (s *store) updateFolder(ctx context.Context, userID, id string, name, color *string) error {
+func (s *store) updateFolder(ctx context.Context, userID, id string, name, color, emoji *string) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE diary_folders
-		SET name = COALESCE($3, name), color = COALESCE($4, color)
-		WHERE id = $1 AND user_id = $2`, id, userID, name, color)
+		SET name = COALESCE($3, name), color = COALESCE($4, color), emoji = COALESCE($5, emoji)
+		WHERE id = $1 AND user_id = $2`, id, userID, name, color, emoji)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
 		return errConflict
@@ -216,8 +223,11 @@ func (s *store) updateFolder(ctx context.Context, userID, id string, name, color
 	return requireRow(tag.RowsAffected(), err)
 }
 
-func (s *store) updateTagColor(ctx context.Context, userID, id, color string) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE diary_tags SET color = $3 WHERE id = $1 AND user_id = $2`, id, userID, color)
+// updateTag changes only the fields that are not nil.
+func (s *store) updateTag(ctx context.Context, userID, id string, color, emoji *string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE diary_tags SET color = COALESCE($3, color), emoji = COALESCE($4, emoji)
+		WHERE id = $1 AND user_id = $2`, id, userID, color, emoji)
 	return requireRow(tag.RowsAffected(), err)
 }
 
@@ -349,6 +359,9 @@ func (s *store) applyPlan(ctx context.Context, userID, captureID string, result 
 			if err := addTags(ctx, tx, userID, ids[i], note.Tags); err != nil {
 				return err
 			}
+			if err := suggestEmojis(ctx, tx, userID, folderID, note); err != nil {
+				return err
+			}
 		}
 		for i, note := range result.Notes {
 			links := make([]string, 0, len(note.RelatedExisting)+len(note.RelatedNew))
@@ -366,6 +379,25 @@ func (s *store) applyPlan(ctx context.Context, userID, captureID string, result 
 			`UPDATE diary_captures SET status = 'done', error = '', processed_at = now() WHERE id = $1`, captureID)
 		return err
 	})
+}
+
+// suggestEmojis fills only what no one has chosen, so the author's choice and
+// removal both stay.
+func suggestEmojis(ctx context.Context, tx pgx.Tx, userID string, folderID *string, note plannedNote) error {
+	if folderID != nil && note.FolderEmoji != "" {
+		if _, err := tx.Exec(ctx,
+			`UPDATE diary_folders SET emoji = $2 WHERE id = $1 AND emoji IS NULL`, *folderID, note.FolderEmoji); err != nil {
+			return err
+		}
+	}
+	for _, item := range note.TagEmojis {
+		if _, err := tx.Exec(ctx,
+			`UPDATE diary_tags SET emoji = $3 WHERE user_id = $1 AND name = $2 AND emoji IS NULL`,
+			userID, item.Tag, item.Emoji); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ensureFolder(ctx context.Context, tx pgx.Tx, userID, name string) (*string, error) {

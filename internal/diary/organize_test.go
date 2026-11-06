@@ -137,6 +137,41 @@ func TestNormalizePlanLimitsNotes(t *testing.T) {
 	}
 }
 
+func TestValidEmoji(t *testing.T) {
+	for _, emoji := range []string{"💼", "❤️", "🏃‍♂️", "👨‍👩‍👧‍👦", "🇷🇺", "👍🏽", "↔️", "ℹ️", "1️⃣", "#️⃣", "🏴󠁧󠁢󠁥󠁮󠁧󠁿"} {
+		if !validEmoji(emoji) {
+			t.Errorf("validEmoji(%q) = false", emoji)
+		}
+	}
+	for _, text := range []string{"", "работа", "a", "💼 работа", "<b>", " ", "\u200d"} {
+		if validEmoji(text) {
+			t.Errorf("validEmoji(%q) = true", text)
+		}
+	}
+}
+
+func TestNormalizePlanCleansEmojis(t *testing.T) {
+	result := normalizePlan(plan{Notes: []plannedNote{{
+		Body:        "текст",
+		Tags:        []string{"Идея", "#дом"},
+		FolderEmoji: " слово ",
+		TagEmojis: []tagEmoji{
+			{Tag: "#ИДЕЯ", Emoji: " 💡 "},
+			{Tag: "идея", Emoji: "🔥"},
+			{Tag: "дом", Emoji: "дом"},
+			{Tag: "чужой", Emoji: "🏠"},
+		},
+	}}}, "текст", 0)
+
+	note := result.Notes[0]
+	if note.FolderEmoji != "" {
+		t.Errorf("FolderEmoji = %q", note.FolderEmoji)
+	}
+	if want := []tagEmoji{{Tag: "идея", Emoji: "💡"}}; !slices.Equal(note.TagEmojis, want) {
+		t.Errorf("TagEmojis = %v, want %v", note.TagEmojis, want)
+	}
+}
+
 func TestBuildPromptIncludesContext(t *testing.T) {
 	prompt := buildPrompt("запись", "2026-11-06", organizerContext{
 		Folders: []string{"Работа"},
