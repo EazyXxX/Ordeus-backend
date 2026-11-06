@@ -172,6 +172,80 @@ func TestNormalizePlanCleansEmojis(t *testing.T) {
 	}
 }
 
+func TestValidWeek(t *testing.T) {
+	if !validWeek("2026-11-02") {
+		t.Error("monday rejected")
+	}
+	for _, week := range []string{"2026-11-03", "2026-13-02", "", "понедельник"} {
+		if validWeek(week) {
+			t.Errorf("validWeek(%q) = true", week)
+		}
+	}
+}
+
+func TestNormalizeSummary(t *testing.T) {
+	got, err := normalizeSummary(summaryPlan{
+		Headline:   " Неделя ",
+		Text:       " Текст ",
+		Highlights: []string{" раз ", "", "два", "три", "четыре", "пять", "шесть"},
+		Themes:     []string{" Спорт "},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Headline != "Неделя" || got.Text != "Текст" || len(got.Highlights) != maxHighlights {
+		t.Errorf("summary = %+v", got)
+	}
+	if got.Themes[0] != "спорт" {
+		t.Errorf("themes = %v", got.Themes)
+	}
+	if _, err := normalizeSummary(summaryPlan{Headline: "Без текста"}); err == nil {
+		t.Error("empty summary accepted")
+	}
+}
+
+func TestBuildSummaryPromptFitsTheWeekIntoTheBudget(t *testing.T) {
+	long := strings.Repeat("слово ", 3000)
+	notes := make([]weekNote, 200)
+	for i := range notes {
+		notes[i] = weekNote{Day: "2026-11-02", Title: "Запись", Body: long}
+	}
+	notes[199].Title = "Последняя"
+
+	prompt := buildSummaryPrompt("2026-11-02", notes, nil)
+	if runes := len([]rune(prompt)); runes > summaryPromptRunes*2 {
+		t.Errorf("prompt is %d runes long", runes)
+	}
+	if !strings.Contains(prompt, "<entries>") || !strings.HasSuffix(prompt, "</entries>") {
+		t.Errorf("prompt lacks entries: %.80s", prompt)
+	}
+}
+
+func TestValidMoods(t *testing.T) {
+	if !validMoods(nil) || !validMoods([]string{"apathy", "swings"}) {
+		t.Error("valid moods rejected")
+	}
+	if validMoods([]string{"joy", "joy"}) || validMoods([]string{"восторг"}) {
+		t.Error("invalid moods accepted")
+	}
+}
+
+func TestSummaryPromptsCarryDayMarks(t *testing.T) {
+	score := 8
+	day := Day{Date: "2026-11-02", Moods: []string{"apathy", "obsessed"}, Score: &score}
+	for _, prompt := range []string{
+		buildSummaryPrompt("2026-11-02", nil, []Day{day}),
+		buildDayPrompt(day, []weekNote{{Title: "Запись", Body: "Текст"}}),
+	} {
+		if !strings.Contains(prompt, "апатия, одержимость чем-то, оценка дня 8 из 10") {
+			t.Errorf("prompt lacks the day mark:\n%s", prompt)
+		}
+	}
+	if mark := dayMark(Day{}); mark != "" {
+		t.Errorf("dayMark = %q", mark)
+	}
+}
+
 func TestBuildPromptIncludesContext(t *testing.T) {
 	prompt := buildPrompt("запись", "2026-11-06", organizerContext{
 		Folders: []string{"Работа"},

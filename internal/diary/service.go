@@ -36,13 +36,26 @@ func New(pool *pgxpool.Pool, modelFor ModelFor) *Service {
 	}
 }
 
-// Run sorts captures one at a time until ctx is cancelled.
+// Run sorts captures and writes summaries one at a time until ctx is cancelled.
 func (s *Service) Run(ctx context.Context) {
 	if err := s.store.requeueInterrupted(ctx); err != nil {
 		slog.Error("requeue captures", "error", err)
 	}
+	if err := s.store.requeueInterruptedSummaries(ctx); err != nil {
+		slog.Error("requeue summaries", "error", err)
+	}
+	if err := s.store.requeueInterruptedDays(ctx); err != nil {
+		slog.Error("requeue days", "error", err)
+	}
 	for {
+		// New entries go first, because their author is waiting for them.
 		err := s.processNext(ctx)
+		if errors.Is(err, errNotFound) {
+			err = s.processNextDay(ctx)
+		}
+		if errors.Is(err, errNotFound) {
+			err = s.processNextSummary(ctx)
+		}
 		if err == nil {
 			continue
 		}

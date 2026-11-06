@@ -36,6 +36,15 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /api/diary/tags/{id}", s.updateTag)
 	mux.HandleFunc("DELETE /api/diary/tags/{id}", s.deleteTag)
 
+	mux.HandleFunc("GET /api/diary/days", s.listDays)
+	mux.HandleFunc("PUT /api/diary/days/{date}", s.updateDay)
+	mux.HandleFunc("POST /api/diary/days/{date}/summary", s.requestDaySummary)
+	mux.HandleFunc("DELETE /api/diary/days/{date}/summary", s.deleteDaySummary)
+
+	mux.HandleFunc("GET /api/diary/summaries", s.listSummaries)
+	mux.HandleFunc("POST /api/diary/summaries", s.requestSummary)
+	mux.HandleFunc("DELETE /api/diary/summaries/{id}", s.deleteSummary)
+
 	mux.HandleFunc("GET /api/diary/captures", s.listCaptures)
 	mux.HandleFunc("POST /api/diary/captures", s.createCapture)
 	mux.HandleFunc("POST /api/diary/captures/{id}/retry", s.retryCapture)

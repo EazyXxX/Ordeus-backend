@@ -11,7 +11,9 @@ import (
 )
 
 const (
-	listLimit           = 500
+	listLimit = 500
+	// The book reads the whole diary, so daily notes go far beyond one screen.
+	dailyListLimit      = 10_000
 	contextNotesLimit   = 50
 	uniqueViolationCode = "23505"
 )
@@ -91,6 +93,10 @@ type store struct {
 }
 
 func (s *store) notes(ctx context.Context, userID string, filter NoteFilter) ([]Note, error) {
+	limit := listLimit
+	if filter.Daily {
+		limit = dailyListLimit
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT n.id::text, n.title, n.body, COALESCE(f.name, ''),
 			COALESCE((
@@ -119,7 +125,7 @@ func (s *store) notes(ctx context.Context, userID string, filter NoteFilter) ([]
 			))
 			AND ($3 = '' OR strpos(lower(n.title || ' ' || n.body), lower($3)) > 0)
 		ORDER BY CASE WHEN $6 THEN n.daily_date END DESC, n.id DESC
-		LIMIT $4`, filter.FolderID, filter.Tag, filter.Query, listLimit, userID, filter.Daily, filter.From, filter.To)
+		LIMIT $4`, filter.FolderID, filter.Tag, filter.Query, limit, userID, filter.Daily, filter.From, filter.To)
 	if err != nil {
 		return nil, err
 	}
