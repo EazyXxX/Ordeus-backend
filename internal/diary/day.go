@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"ordeus/backend/internal/ai"
 	"ordeus/backend/internal/auth"
 	"ordeus/backend/internal/httpjson"
 )
@@ -42,7 +43,7 @@ var moodLabels = map[string]string{
 const dayPrompt = `Ты помогаешь автору личного дневника подвести итог дня. Тебе дают его записи за один день, а иногда настроение и оценку дня, которые он поставил сам.
 
 Правила:
-- Пиши по-русски и обращайся к автору на «ты».
+- Пиши на языке записей и обращайся к автору на «ты». Если записи на английском, весь ответ на английском.
 - Род автора бери из его записей. Если он не виден, строй фразы так, чтобы род не указывать.
 - Опирайся только на записи. Не придумывай событий, людей и чувств, которых в них нет.
 - text — итог дня в 1–3 предложениях: что было главным и каким получился день.
@@ -105,7 +106,16 @@ func buildDayPrompt(day Day, notes []weekNote) string {
 		fmt.Fprintf(&prompt, "%s:\n%s\n\n", note.Title, truncate(note.Body, limit))
 	}
 	prompt.WriteString("</entries>")
+	prompt.WriteString(ai.ReplyRule(notesText(notes)))
 	return prompt.String()
+}
+
+func notesText(notes []weekNote) string {
+	var text strings.Builder
+	for _, note := range notes {
+		text.WriteString(note.Title + " " + note.Body + " ")
+	}
+	return text.String()
 }
 
 // dayMark puts a day's mood and score into words, or returns nothing if unmarked.

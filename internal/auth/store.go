@@ -28,11 +28,11 @@ var ownedTables = []string{
 	"diary_folders", "diary_tags", "diary_captures", "diary_notes",
 }
 
-var defaultColumns = []struct{ title, color string }{
-	{"Бэклог", "gray"},
-	{"Нужно сделать", "blue"},
-	{"В работе", "orange"},
-	{"Готово", "green"},
+type defaultColumn struct{ title, color string }
+
+var defaultColumns = map[string][]defaultColumn{
+	"ru": {{"Бэклог", "gray"}, {"Нужно сделать", "blue"}, {"В работе", "orange"}, {"Готово", "green"}},
+	"en": {{"Backlog", "gray"}, {"To do", "blue"}, {"In progress", "orange"}, {"Done", "green"}},
 }
 
 type User struct {
@@ -40,6 +40,8 @@ type User struct {
 	Email string `json:"email"`
 	Name  string `json:"name"`
 	Color string `json:"color"`
+	// Language is the interface language: ru or en.
+	Language string `json:"language"`
 }
 
 type Stats struct {
@@ -60,8 +62,8 @@ type store struct {
 
 // createUser adds an account. The first account also receives every row from
 // before accounts existed, so the existing diary and board are not lost.
-func (s *store) createUser(ctx context.Context, email, name, passwordHash string) (User, error) {
-	user := User{Email: email, Name: name}
+func (s *store) createUser(ctx context.Context, email, name, passwordHash, language string) (User, error) {
+	user := User{Email: email, Name: name, Language: language}
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, registrationLockKey); err != nil {
 			return err
@@ -72,8 +74,8 @@ func (s *store) createUser(ctx context.Context, email, name, passwordHash string
 		}
 
 		err := tx.QueryRow(ctx, `
-			INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3)
-			RETURNING id::text, color`, email, name, passwordHash).Scan(&user.ID, &user.Color)
+			INSERT INTO users (email, name, password_hash, language) VALUES ($1, $2, $3, $4)
+			RETURNING id::text, color`, email, name, passwordHash, language).Scan(&user.ID, &user.Color)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
 			return errEmailTaken
@@ -87,7 +89,7 @@ func (s *store) createUser(ctx context.Context, email, name, passwordHash string
 				return err
 			}
 		}
-		return seedColumns(ctx, tx, user.ID)
+		return seedColumns(ctx, tx, user.ID, language)
 	})
 	return user, err
 }
@@ -103,14 +105,14 @@ func claimExistingData(ctx context.Context, tx pgx.Tx, userID string) error {
 	return nil
 }
 
-func seedColumns(ctx context.Context, tx pgx.Tx, userID string) error {
+func seedColumns(ctx context.Context, tx pgx.Tx, userID, language string) error {
 	var hasColumns bool
 	err := tx.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM kanban_columns WHERE user_id = $1)`, userID).Scan(&hasColumns)
 	if err != nil || hasColumns {
 		return err
 	}
-	for position, column := range defaultColumns {
+	for position, column := range defaultColumns[language] {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO kanban_columns (user_id, title, color, position) VALUES ($1, $2, $3, $4)`,
 			userID, column.title, column.color, position); err != nil {
@@ -125,8 +127,8 @@ func (s *store) credentials(ctx context.Context, email string) (User, string, er
 	var user User
 	var hash string
 	err := s.pool.QueryRow(ctx, `
-		SELECT id::text, email, name, color, password_hash FROM users WHERE lower(email) = lower($1)`, email,
-	).Scan(&user.ID, &user.Email, &user.Name, &user.Color, &hash)
+		SELECT id::text, email, name, color, language, password_hash FROM users WHERE lower(email) = lower($1)`, email,
+	).Scan(&user.ID, &user.Email, &user.Name, &user.Color, &user.Language, &hash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, "", errNotFound
 	}
@@ -158,7 +160,7 @@ func (s *store) sessions(ctx context.Context, tokens []string) ([]session, error
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT s.token_hash, u.id::text, u.email, u.name, u.color
+		SELECT s.token_hash, u.id::text, u.email, u.name, u.color, u.language
 		FROM sessions s
 		JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = ANY($1) AND s.expires_at > now()`, hashes)
@@ -171,7 +173,7 @@ func (s *store) sessions(ctx context.Context, tokens []string) ([]session, error
 	for rows.Next() {
 		var hash []byte
 		var user User
-		if err := rows.Scan(&hash, &user.ID, &user.Email, &user.Name, &user.Color); err != nil {
+		if err := rows.Scan(&hash, &user.ID, &user.Email, &user.Name, &user.Color, &user.Language); err != nil {
 			return nil, err
 		}
 		found[string(hash)] = user
@@ -200,6 +202,11 @@ func (s *store) deleteSessions(ctx context.Context, tokens []string) error {
 
 func (s *store) deleteExpiredSessions(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE expires_at <= now()`)
+	return err
+}
+
+func (s *store) updateLanguage(ctx context.Context, userID, language string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE users SET language = $2 WHERE id = $1`, userID, language)
 	return err
 }
 

@@ -9,11 +9,13 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"ordeus/backend/internal/ai"
 	"ordeus/backend/internal/kanban"
 )
 
 const (
 	fallbackFolder   = "Входящие"
+	englishFallback  = "Inbox"
 	maxPlannedNotes  = 10
 	maxNoteTags      = 5
 	maxTagLength     = 50
@@ -124,6 +126,8 @@ type organizerContext struct {
 	Folders []string
 	Tags    []string
 	Notes   []NoteRef
+	// Language is the interface language of the account.
+	Language string
 }
 
 func organize(ctx context.Context, model StructuredModel, text, writtenOn string, known organizerContext) (plan, error) {
@@ -133,7 +137,21 @@ func organize(ctx context.Context, model StructuredModel, text, writtenOn string
 		return plan{}, err
 	}
 	normalized := normalizePlan(result, text, len(known.Notes))
-	return plan{Notes: withValidDailyDates(normalized.Notes, writtenOn)}, nil
+	return plan{Notes: withLocalFallback(withValidDailyDates(normalized.Notes, writtenOn), known.Language)}, nil
+}
+
+// withLocalFallback names the fallback folder in the account's language.
+func withLocalFallback(notes []plannedNote, language string) []plannedNote {
+	if language != "en" {
+		return notes
+	}
+	result := slices.Clone(notes)
+	for i, note := range result {
+		if note.Folder == fallbackFolder {
+			result[i].Folder = englishFallback
+		}
+	}
+	return result
 }
 
 // withValidDailyDates drops dates that are not real or lie in the future: a
@@ -176,7 +194,7 @@ func buildPrompt(text, writtenOn string, known organizerContext) string {
 	for i, note := range known.Notes {
 		fmt.Fprintf(&prompt, "%d. %s\n", i+1, note.Title)
 	}
-	fmt.Fprintf(&prompt, "\n<entry>\n%s\n</entry>", text)
+	fmt.Fprintf(&prompt, "\n<entry>\n%s\n</entry>%s", text, ai.ReplyRule(text))
 	return prompt.String()
 }
 

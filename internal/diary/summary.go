@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"ordeus/backend/internal/ai"
 	"ordeus/backend/internal/auth"
 	"ordeus/backend/internal/httpjson"
 )
@@ -34,7 +35,7 @@ const (
 const summaryPrompt = `Ты помогаешь автору личного дневника подвести итоги недели. Тебе дают его записи за неделю, разложенные по дням.
 
 Правила:
-- Пиши по-русски и обращайся к автору на «ты».
+- Пиши на языке записей и обращайся к автору на «ты». Если записи на английском, весь ответ на английском.
 - Род автора бери из его записей. Если он не виден, строй фразы так, чтобы род не указывать.
 - Опирайся только на записи. Не придумывай событий, людей и чувств, которых в них нет.
 - headline — короткая фраза до 8 слов о сути недели. Без слов «итоги» и «неделя».
@@ -125,6 +126,7 @@ func buildSummaryPrompt(week string, notes []weekNote, marks []Day) string {
 		fmt.Fprintf(&prompt, "%s, %s:\n%s\n\n", note.Day, note.Title, truncate(note.Body, limit))
 	}
 	prompt.WriteString("</entries>")
+	prompt.WriteString(ai.ReplyRule(notesText(notes)))
 	return prompt.String()
 }
 

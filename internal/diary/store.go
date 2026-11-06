@@ -319,6 +319,9 @@ func (s *store) failCapture(ctx context.Context, id, message string) error {
 
 func (s *store) organizerContext(ctx context.Context, userID string) (organizerContext, error) {
 	var known organizerContext
+	if err := s.pool.QueryRow(ctx, `SELECT language FROM users WHERE id = $1`, userID).Scan(&known.Language); err != nil {
+		return known, err
+	}
 	rows, err := s.pool.Query(ctx, `SELECT name FROM diary_folders WHERE user_id = $1 ORDER BY lower(name)`, userID)
 	if err != nil {
 		return known, err

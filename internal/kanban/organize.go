@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"ordeus/backend/internal/ai"
 )
 
 const (
@@ -96,7 +98,7 @@ func buildPrompt(text, writtenOn string) string {
 			fmt.Fprintf(&prompt, "%s — %s\n", day.Format(time.DateOnly), weekdays[day.Weekday()])
 		}
 	}
-	fmt.Fprintf(&prompt, "\n<entry>\n%s\n</entry>", text)
+	fmt.Fprintf(&prompt, "\n<entry>\n%s\n</entry>%s", text, ai.ReplyRule(text))
 	return prompt.String()
 }
 

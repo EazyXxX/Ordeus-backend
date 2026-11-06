@@ -172,6 +172,16 @@ func TestNormalizePlanCleansEmojis(t *testing.T) {
 	}
 }
 
+func TestWithLocalFallback(t *testing.T) {
+	notes := []plannedNote{{Folder: fallbackFolder}, {Folder: "Работа"}}
+	if got := withLocalFallback(notes, "en"); got[0].Folder != englishFallback || got[1].Folder != "Работа" {
+		t.Errorf("notes = %+v", got)
+	}
+	if got := withLocalFallback(notes, "ru"); got[0].Folder != fallbackFolder {
+		t.Errorf("notes = %+v", got)
+	}
+}
+
 func TestValidWeek(t *testing.T) {
 	if !validWeek("2026-11-02") {
 		t.Error("monday rejected")

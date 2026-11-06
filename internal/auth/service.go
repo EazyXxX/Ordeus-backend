@@ -27,6 +27,9 @@ const (
 	maxEmailLength   = 254
 )
 
+// The first is used when a client asks for a language the app does not have.
+var languages = []string{"ru", "en"}
+
 var colors = []string{"gray", "red", "orange", "yellow", "green", "blue", "purple", "pink"}
 
 type contextKey struct{}
@@ -78,6 +81,7 @@ func (s *Service) RegisterPublic(mux *http.ServeMux) {
 // RegisterProtected adds the personal cabinet routes.
 func (s *Service) RegisterProtected(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /api/account", s.updateProfile)
+	mux.HandleFunc("PATCH /api/account/language", s.updateLanguage)
 	mux.HandleFunc("POST /api/account/password", s.changePassword)
 	mux.HandleFunc("GET /api/account/stats", s.stats)
 }
@@ -143,12 +147,16 @@ func (s *Service) register(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Name     string `json:"name"`
 		Password string `json:"password"`
+		Language string `json:"language"`
 	}
 	if !httpjson.Bind(w, r, &input) {
 		return
 	}
 	input.Email = normalizeEmail(input.Email)
 	input.Name = strings.TrimSpace(input.Name)
+	if !slices.Contains(languages, input.Language) {
+		input.Language = languages[0]
+	}
 
 	if problem := registrationProblem(input.Email, input.Name, input.Password); problem != "" {
 		httpjson.Error(w, http.StatusBadRequest, problem)
@@ -160,7 +168,7 @@ func (s *Service) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := s.store.createUser(r.Context(), input.Email, input.Name, string(hash))
+	user, err := s.store.createUser(r.Context(), input.Email, input.Name, string(hash), input.Language)
 	if errors.Is(err, errEmailTaken) {
 		httpjson.Error(w, http.StatusConflict, "email is already registered")
 		return
@@ -292,6 +300,24 @@ func (s *Service) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpjson.Write(w, http.StatusOK, toResponse(remaining))
+}
+
+func (s *Service) updateLanguage(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Language string `json:"language"`
+	}
+	if !httpjson.Bind(w, r, &input) {
+		return
+	}
+	if !slices.Contains(languages, input.Language) {
+		httpjson.Error(w, http.StatusBadRequest, "unknown language")
+		return
+	}
+	if err := s.store.updateLanguage(r.Context(), UserID(r.Context()), input.Language); err != nil {
+		fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Service) updateProfile(w http.ResponseWriter, r *http.Request) {
