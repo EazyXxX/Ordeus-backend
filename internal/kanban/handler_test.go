@@ -1,6 +1,9 @@
 package kanban
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func validInput() CardInput {
 	return CardInput{Title: "Задача", Color: "gray", Priority: "none"}
@@ -21,6 +24,7 @@ func TestCardProblem(t *testing.T) {
 			input.Priority = "urgent"
 			input.DueDate = &goodDate
 		}, ""},
+		{"long category", func(input *CardInput) { input.Category = strings.Repeat("я", maxCategoryLength+1) }, "category is too long"},
 		{"unknown color", func(input *CardInput) { input.Color = "#fff" }, "unknown color"},
 		{"no color", func(input *CardInput) { input.Color = "" }, "unknown color"},
 		{"unknown priority", func(input *CardInput) { input.Priority = "" }, "unknown priority"},

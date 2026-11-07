@@ -90,9 +90,13 @@ func (s *Service) processNext(ctx context.Context) error {
 	if err != nil {
 		return s.failCapture(ctx, capture.id, err)
 	}
+	categories, err := s.store.categories(ctx, capture.userID)
+	if err != nil {
+		return s.failCapture(ctx, capture.id, err)
+	}
 	organizeCtx, cancel := context.WithTimeout(ctx, organizeTimeout)
 	defer cancel()
-	tasks, err := organize(organizeCtx, model, capture.text, capture.writtenOn)
+	tasks, err := organize(organizeCtx, model, capture.text, capture.writtenOn, categories)
 	if err != nil {
 		return s.failCapture(ctx, capture.id, err)
 	}
@@ -254,9 +258,9 @@ func (s *store) applyTasks(ctx context.Context, userID, captureID string, tasks 
 		}
 		for i, task := range tasks {
 			_, err := tx.Exec(ctx, `
-				INSERT INTO kanban_cards (user_id, column_id, title, description, priority, due_date, position)
-				VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::date, $7)`,
-				userID, columnID, task.Title, task.Description, task.Priority, task.DueDate, position+i)
+				INSERT INTO kanban_cards (user_id, column_id, title, description, category, priority, due_date, position)
+				VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::date, $8)`,
+				userID, columnID, task.Title, task.Description, task.Category, task.Priority, task.DueDate, position+i)
 			if err != nil {
 				return err
 			}

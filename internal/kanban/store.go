@@ -23,6 +23,7 @@ type Card struct {
 	ColumnID    string          `json:"columnId"`
 	Title       string          `json:"title"`
 	Description string          `json:"description"`
+	Category    string          `json:"category"`
 	Color       string          `json:"color"`
 	Priority    string          `json:"priority"`
 	DueDate     *string         `json:"dueDate"`
@@ -35,6 +36,7 @@ type Card struct {
 type CardInput struct {
 	Title       string          `json:"title"`
 	Description string          `json:"description"`
+	Category    string          `json:"category"`
 	Color       string          `json:"color"`
 	Priority    string          `json:"priority"`
 	DueDate     *string         `json:"dueDate"`
@@ -71,7 +73,7 @@ func (s *store) board(ctx context.Context, userID string) (Board, error) {
 	}
 
 	rows, err = s.pool.Query(ctx, `
-		SELECT id::text, column_id::text, title, description, color, priority,
+		SELECT id::text, column_id::text, title, description, category, color, priority,
 			to_char(due_date, 'YYYY-MM-DD'), checklist, created_at, updated_at
 		FROM kanban_cards
 		WHERE user_id = $1
@@ -155,13 +157,31 @@ func (s *store) createCard(ctx context.Context, userID, columnID, title string) 
 	return card, err
 }
 
+// updateCard takes the spelling of a category the account already has, so that
+// «дом» and «Дом» do not become two groups.
 func (s *store) updateCard(ctx context.Context, userID, id string, input CardInput) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE kanban_cards
-		SET title = $3, description = $4, color = $5, priority = $6, due_date = $7::date, checklist = $8
+		SET title = $3, description = $4, color = $5, priority = $6, due_date = $7::date, checklist = $8,
+			category = COALESCE((
+				SELECT other.category FROM kanban_cards other
+				WHERE other.user_id = $2 AND other.id <> $1 AND lower(other.category) = lower($9)
+				LIMIT 1
+			), $9)
 		WHERE id = $1 AND user_id = $2`,
-		id, userID, input.Title, input.Description, input.Color, input.Priority, input.DueDate, input.Checklist)
+		id, userID, input.Title, input.Description, input.Color, input.Priority, input.DueDate, input.Checklist,
+		input.Category)
 	return requireRow(tag.RowsAffected(), err)
+}
+
+// categories lists the ones in use, for the model to reuse.
+func (s *store) categories(ctx context.Context, userID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT category FROM kanban_cards WHERE user_id = $1 AND category <> '' ORDER BY category`, userID)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 func (s *store) deleteCard(ctx context.Context, userID, id string) error {

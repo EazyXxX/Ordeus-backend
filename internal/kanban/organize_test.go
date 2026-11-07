@@ -7,7 +7,7 @@ import (
 )
 
 func TestNormalizeTasksKeepsAnEntryWhenModelReturnsNothing(t *testing.T) {
-	got := normalizeTasks([]plannedTask{{Title: "  "}}, " Купить хлеб\nи молоко ")
+	got := normalizeTasks([]plannedTask{{Title: "  "}}, " Купить хлеб\nи молоко ", nil)
 
 	if len(got) != 1 {
 		t.Fatalf("tasks = %d", len(got))
@@ -27,7 +27,7 @@ func TestNormalizeTasksCleansFields(t *testing.T) {
 		Title:    "Отправить отчёт",
 		DueDate:  " 2026-11-13 ",
 		Priority: "high",
-	}}, "текст")
+	}}, "текст", nil)
 
 	if got[0].Title != "Позвонить" || got[0].Description != "В банк" {
 		t.Errorf("first = %+v", got[0])
@@ -46,7 +46,7 @@ func TestNormalizeTasksLimits(t *testing.T) {
 		raw[i].Title = strings.Repeat("я", maxTitleLength+10)
 	}
 
-	got := normalizeTasks(raw, "текст")
+	got := normalizeTasks(raw, "текст", nil)
 
 	if len(got) != maxPlannedTasks {
 		t.Errorf("tasks = %d", len(got))
@@ -57,7 +57,7 @@ func TestNormalizeTasksLimits(t *testing.T) {
 }
 
 func TestBuildPromptGivesTodayWithWeekday(t *testing.T) {
-	prompt := buildPrompt("запись", "2026-11-06")
+	prompt := buildPrompt("запись", "2026-11-06", nil)
 	for _, part := range []string{
 		"2026-11-06, пятница",
 		"2026-11-07 — суббота",
@@ -67,5 +67,30 @@ func TestBuildPromptGivesTodayWithWeekday(t *testing.T) {
 		if !strings.Contains(prompt, part) {
 			t.Errorf("prompt lacks %q:\n%s", part, prompt)
 		}
+	}
+}
+
+func TestNormalizeTasksKeepsOneSpellingOfACategory(t *testing.T) {
+	raw := []plannedTask{
+		{Title: "Помыть машину", Category: " машина "},
+		{Title: "Купить лампу", Category: "дом"},
+		{Title: "Позвать гостей", Category: "ДОМ"},
+		{Title: "Подумать", Category: "  "},
+	}
+	got := normalizeTasks(raw, "текст", []string{"Машина"})
+	want := []string{"Машина", "дом", "дом", ""}
+	for i, task := range got {
+		if task.Category != want[i] {
+			t.Errorf("task %d: category = %q, want %q", i, task.Category, want[i])
+		}
+	}
+}
+
+func TestBuildPromptListsCategories(t *testing.T) {
+	if prompt := buildPrompt("запись", "2026-11-06", []string{"Дом", "Машина"}); !strings.Contains(prompt, "Дом, Машина") {
+		t.Errorf("prompt = %q", prompt)
+	}
+	if prompt := buildPrompt("запись", "2026-11-06", nil); strings.Contains(prompt, "Категории автора") {
+		t.Errorf("prompt = %q", prompt)
 	}
 }

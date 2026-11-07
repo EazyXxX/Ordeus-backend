@@ -19,6 +19,7 @@ import (
 const (
 	maxTitleLength       = 200
 	maxDescriptionLength = 10_000
+	maxCategoryLength    = 50
 	maxChecklistItems    = 100
 )
 
@@ -185,10 +186,13 @@ func validCard(w http.ResponseWriter, input *CardInput) bool {
 
 func cardProblem(input *CardInput) string {
 	input.Checklist = cleanChecklist(input.Checklist)
+	input.Category = strings.TrimSpace(input.Category)
 
 	switch {
 	case utf8.RuneCountInString(input.Description) > maxDescriptionLength:
 		return "description is too long"
+	case utf8.RuneCountInString(input.Category) > maxCategoryLength:
+		return "category is too long"
 	case !slices.Contains(Colors, input.Color):
 		return "unknown color"
 	case !slices.Contains(priorities, input.Priority):

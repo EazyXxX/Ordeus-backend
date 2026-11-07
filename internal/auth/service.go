@@ -13,6 +13,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
@@ -29,6 +30,8 @@ const (
 
 // The first is used when a client asks for a language the app does not have.
 var languages = []string{"ru", "en"}
+
+var taskCategoryModes = []string{"off", "all", "backlog"}
 
 var colors = []string{"gray", "red", "orange", "yellow", "green", "blue", "purple", "pink"}
 
@@ -82,6 +85,7 @@ func (s *Service) RegisterPublic(mux *http.ServeMux) {
 func (s *Service) RegisterProtected(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /api/account", s.updateProfile)
 	mux.HandleFunc("PATCH /api/account/language", s.updateLanguage)
+	mux.HandleFunc("PATCH /api/account/tasks", s.updateTaskSettings)
 	mux.HandleFunc("POST /api/account/password", s.changePassword)
 	mux.HandleFunc("GET /api/account/stats", s.stats)
 }
@@ -300,6 +304,34 @@ func (s *Service) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpjson.Write(w, http.StatusOK, toResponse(remaining))
+}
+
+func (s *Service) updateTaskSettings(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Categories      string  `json:"categories"`
+		BacklogColumnID *string `json:"backlogColumnId"`
+	}
+	if !httpjson.Bind(w, r, &input) {
+		return
+	}
+	if !slices.Contains(taskCategoryModes, input.Categories) {
+		httpjson.Error(w, http.StatusBadRequest, "unknown category mode")
+		return
+	}
+	if input.BacklogColumnID != nil && uuid.Validate(*input.BacklogColumnID) != nil {
+		httpjson.Error(w, http.StatusBadRequest, "invalid column")
+		return
+	}
+	err := s.store.updateTaskSettings(r.Context(), UserID(r.Context()), input.Categories, input.BacklogColumnID)
+	if errors.Is(err, errNotFound) {
+		httpjson.Error(w, http.StatusBadRequest, "unknown column")
+		return
+	}
+	if err != nil {
+		fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Service) updateLanguage(w http.ResponseWriter, r *http.Request) {

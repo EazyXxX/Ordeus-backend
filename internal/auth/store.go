@@ -42,6 +42,10 @@ type User struct {
 	Color string `json:"color"`
 	// Language is the interface language: ru or en.
 	Language string `json:"language"`
+	// TaskCategories says where the task board shows categories: off, all or backlog.
+	TaskCategories string `json:"taskCategories"`
+	// BacklogColumnID is empty when the board's first column stands in for it.
+	BacklogColumnID *string `json:"backlogColumnId"`
 }
 
 type Stats struct {
@@ -63,7 +67,7 @@ type store struct {
 // createUser adds an account. The first account also receives every row from
 // before accounts existed, so the existing diary and board are not lost.
 func (s *store) createUser(ctx context.Context, email, name, passwordHash, language string) (User, error) {
-	user := User{Email: email, Name: name, Language: language}
+	user := User{Email: email, Name: name, Language: language, TaskCategories: "all"}
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, registrationLockKey); err != nil {
 			return err
@@ -75,7 +79,8 @@ func (s *store) createUser(ctx context.Context, email, name, passwordHash, langu
 
 		err := tx.QueryRow(ctx, `
 			INSERT INTO users (email, name, password_hash, language) VALUES ($1, $2, $3, $4)
-			RETURNING id::text, color`, email, name, passwordHash, language).Scan(&user.ID, &user.Color)
+			RETURNING id::text, color, backlog_column_id::text`, email, name, passwordHash, language,
+		).Scan(&user.ID, &user.Color, &user.BacklogColumnID)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
 			return errEmailTaken
@@ -119,7 +124,11 @@ func seedColumns(ctx context.Context, tx pgx.Tx, userID, language string) error 
 			return err
 		}
 	}
-	return nil
+	_, err = tx.Exec(ctx, `
+		UPDATE users SET backlog_column_id = (
+			SELECT id FROM kanban_columns WHERE user_id = $1 ORDER BY position, id LIMIT 1
+		) WHERE id = $1`, userID)
+	return err
 }
 
 // credentials returns the stored hash for an email.
@@ -127,8 +136,9 @@ func (s *store) credentials(ctx context.Context, email string) (User, string, er
 	var user User
 	var hash string
 	err := s.pool.QueryRow(ctx, `
-		SELECT id::text, email, name, color, language, password_hash FROM users WHERE lower(email) = lower($1)`, email,
-	).Scan(&user.ID, &user.Email, &user.Name, &user.Color, &user.Language, &hash)
+		SELECT id::text, email, name, color, language, task_categories, backlog_column_id::text, password_hash
+		FROM users WHERE lower(email) = lower($1)`, email,
+	).Scan(&user.ID, &user.Email, &user.Name, &user.Color, &user.Language, &user.TaskCategories, &user.BacklogColumnID, &hash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, "", errNotFound
 	}
@@ -160,7 +170,7 @@ func (s *store) sessions(ctx context.Context, tokens []string) ([]session, error
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT s.token_hash, u.id::text, u.email, u.name, u.color, u.language
+		SELECT s.token_hash, u.id::text, u.email, u.name, u.color, u.language, u.task_categories, u.backlog_column_id::text
 		FROM sessions s
 		JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = ANY($1) AND s.expires_at > now()`, hashes)
@@ -173,7 +183,9 @@ func (s *store) sessions(ctx context.Context, tokens []string) ([]session, error
 	for rows.Next() {
 		var hash []byte
 		var user User
-		if err := rows.Scan(&hash, &user.ID, &user.Email, &user.Name, &user.Color, &user.Language); err != nil {
+		err := rows.Scan(&hash, &user.ID, &user.Email, &user.Name, &user.Color, &user.Language,
+			&user.TaskCategories, &user.BacklogColumnID)
+		if err != nil {
 			return nil, err
 		}
 		found[string(hash)] = user
@@ -208,6 +220,22 @@ func (s *store) deleteExpiredSessions(ctx context.Context) error {
 func (s *store) updateLanguage(ctx context.Context, userID, language string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE users SET language = $2 WHERE id = $1`, userID, language)
 	return err
+}
+
+// updateTaskSettings refuses a column of another account.
+func (s *store) updateTaskSettings(ctx context.Context, userID, categories string, backlogColumnID *string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE users SET task_categories = $2, backlog_column_id = $3::uuid
+		WHERE id = $1 AND ($3::uuid IS NULL
+			OR EXISTS (SELECT 1 FROM kanban_columns WHERE id = $3::uuid AND user_id = $1))`,
+		userID, categories, backlogColumnID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errNotFound
+	}
+	return nil
 }
 
 func (s *store) updateProfile(ctx context.Context, userID, name, color string) error {
