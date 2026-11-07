@@ -272,9 +272,9 @@ const weekNotesFilter = `user_id = $1 AND (
 	daily_date BETWEEN $2::date AND $2::date + 6
 	OR (daily_date IS NULL AND created_at >= $2::date AND created_at < $2::date + 7))`
 
-// requestSummary leaves an existing summary alone, unless forced or written
-// before the week ended, when it covers only part of the week. A summary the
-// author deleted stays deleted until the author asks for it again.
+// requestSummary leaves a week that has been summed up alone unless forced,
+// because every summary spends the model. A summary that failed or was deleted
+// also waits for the author to ask.
 func (s *store) requestSummary(ctx context.Context, userID, week string, force bool) error {
 	var notes int
 	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM diary_notes WHERE `+weekNotesFilter, userID, week).Scan(&notes)
@@ -287,8 +287,7 @@ func (s *store) requestSummary(ctx context.Context, userID, week string, force b
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO diary_summaries (user_id, week_start) VALUES ($1, $2::date)
 		ON CONFLICT (user_id, week_start) DO UPDATE SET status = 'pending', error = '', updated_at = now()
-		WHERE diary_summaries.status NOT IN ('pending', 'processing') AND (
-			$3 OR (diary_summaries.status IN ('done', 'failed') AND diary_summaries.updated_at < $2::date + 7))`,
+		WHERE diary_summaries.status NOT IN ('pending', 'processing') AND $3`,
 		userID, week, force)
 	return err
 }

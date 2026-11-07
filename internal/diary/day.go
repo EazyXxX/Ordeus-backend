@@ -274,9 +274,9 @@ func (s *store) dayNotes(ctx context.Context, userID, date string) ([]weekNote, 
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[weekNote])
 }
 
-// requestDaySummary leaves an existing summary alone, unless forced or written
-// before the day ended, when it covers only part of the day. A summary the
-// author deleted stays deleted until the author asks for it again.
+// requestDaySummary leaves a day that has been summed up alone unless forced,
+// because every summary spends the model. A summary that failed or was deleted
+// also waits for the author to ask.
 func (s *store) requestDaySummary(ctx context.Context, userID, date string, force bool) error {
 	notes, err := s.dayNotes(ctx, userID, date)
 	if err != nil {
@@ -288,9 +288,8 @@ func (s *store) requestDaySummary(ctx context.Context, userID, date string, forc
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO diary_days (user_id, day, summary_status) VALUES ($1, $2::date, 'pending')
 		ON CONFLICT (user_id, day) DO UPDATE SET summary_status = 'pending', summary_error = ''
-		WHERE diary_days.summary_status NOT IN ('pending', 'processing') AND (
-			$3 OR diary_days.summary_status = 'none'
-			OR (diary_days.summary_status IN ('done', 'failed') AND diary_days.summarized_at < $2::date + 1))`,
+		WHERE diary_days.summary_status NOT IN ('pending', 'processing')
+			AND ($3 OR diary_days.summary_status = 'none')`,
 		userID, date, force)
 	return err
 }
