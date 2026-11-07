@@ -27,6 +27,7 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/diary/notes", s.createNote)
 	mux.HandleFunc("PATCH /api/diary/notes/{id}", s.updateNote)
 	mux.HandleFunc("DELETE /api/diary/notes/{id}", s.deleteNote)
+	mux.HandleFunc("POST /api/diary/proofread", s.proofreadNote)
 
 	mux.HandleFunc("GET /api/diary/folders", s.listFolders)
 	mux.HandleFunc("PATCH /api/diary/folders/{id}", s.updateFolder)
