@@ -286,3 +286,25 @@ func TestOrganizeReportsModelFailure(t *testing.T) {
 		t.Fatal("expected an error")
 	}
 }
+
+func TestWithDatedTitles(t *testing.T) {
+	notes := []plannedNote{
+		{Title: "Поездка к родителям", DailyDate: "2026-11-08"},
+		{Title: "08.11.2026: Поездка", DailyDate: "2026-11-08"},
+		{Title: "08.11.20266 идей", DailyDate: "2026-11-08"},
+		{Title: "Идеи", DailyDate: ""},
+		{Title: "", DailyDate: "2026-03-01"},
+	}
+	want := []string{
+		"08.11.2026 — Поездка к родителям",
+		"08.11.2026 — Поездка",
+		"08.11.2026 — 08.11.20266 идей",
+		"Идеи",
+		"01.03.2026",
+	}
+	for i, note := range withDatedTitles(notes) {
+		if note.Title != want[i] {
+			t.Errorf("note %d: title = %q, want %q", i, note.Title, want[i])
+		}
+	}
+}

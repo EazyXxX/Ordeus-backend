@@ -34,7 +34,7 @@ const organizerPrompt = `Ты ведёшь личный дневник авто�
 - Раздели запись на несколько заметок только в одном случае: автор прямо просит об этом в самой записи, например «раздели на темы», «разбей на заметки», «это разные заметки». Твоё собственное мнение, что тем несколько, поводом не считается.
 - Если автор просит разделить, само это указание в body не включай.
 - В body сохраняй слова автора дословно. Не пересказывай, не исправляй, не сокращай и ничего не добавляй.
-- title — короткий заголовок всей заметки на языке записи, до 8 слов. Он передаёт содержание: дату и слова вроде «запись» в него не вставляй.
+- title — короткий заголовок всей заметки на языке записи, до 8 слов. Он передаёт содержание: слова вроде «запись» в него не вставляй. Дату тоже не пиши: у дейли-заметки программа сама поставит её в начало заголовка.
 - daily_date — заполняется только у дейли-заметки. Это запись о дне автора: что он делал, делает сегодня или что с ним произошло, например «сегодня съездил к родителям, потом работал над проектом». Обычно это сегодняшняя дата. Если автор рассказывает о прошедшем дне, например «вчера ходил на концерт», это тоже дейли-заметка: возьми дату этого дня из списка прошедших дней. Планы на будущее, идеи, рассуждения, заметки о фактах и списки дел дейли не являются: для них оставь пустую строку.
 - Автор может сам задать заголовок первой строкой: это отдельная короткая строка без подробностей, а основной текст идёт со следующей строки. В таком случае скопируй эту строку в title дословно, ничего не меняя. Первая строка, которая уже является частью рассказа, заголовком не считается: тогда придумай title сам.
 - folder — название папки. Выбирай из существующих, если подходит. Новую создавай, только если ни одна не подходит. Название общее, из одного-двух слов.
@@ -137,7 +137,36 @@ func organize(ctx context.Context, model StructuredModel, text, writtenOn string
 		return plan{}, err
 	}
 	normalized := normalizePlan(result, text, len(known.Notes))
-	return plan{Notes: withLocalFallback(withValidDailyDates(normalized.Notes, writtenOn), known.Language)}, nil
+	notes := withValidDailyDates(normalized.Notes, writtenOn)
+	return plan{Notes: withDatedTitles(withLocalFallback(notes, known.Language))}, nil
+}
+
+// dailyDateLayout is a full date, so that the graph shows the year too.
+const dailyDateLayout = "02.01.2006"
+
+// withDatedTitles starts the title of every daily note with its date, so that
+// the days stand out on the graph. It is done here and not by the model,
+// which may miscount a date or write it its own way. A title that already
+// starts with the day keeps it once.
+func withDatedTitles(notes []plannedNote) []plannedNote {
+	result := slices.Clone(notes)
+	for i, note := range result {
+		date, err := time.Parse(time.DateOnly, note.DailyDate)
+		if err != nil {
+			continue
+		}
+		label := date.Format(dailyDateLayout)
+		title := strings.TrimSpace(note.Title)
+		if rest, found := strings.CutPrefix(title, label); found && (rest == "" || !unicode.IsLetter([]rune(rest)[0]) && !unicode.IsDigit([]rune(rest)[0])) {
+			title = strings.TrimLeft(rest, " —–-:,.")
+		}
+		dated := label
+		if title != "" {
+			dated += " — " + title
+		}
+		result[i].Title = truncate(dated, maxTitleLength)
+	}
+	return result
 }
 
 // withLocalFallback names the fallback folder in the account's language.
