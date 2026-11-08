@@ -307,10 +307,7 @@ func (s *Service) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) updateTaskSettings(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Categories      string  `json:"categories"`
-		BacklogColumnID *string `json:"backlogColumnId"`
-	}
+	var input TaskSettings
 	if !httpjson.Bind(w, r, &input) {
 		return
 	}
@@ -318,11 +315,11 @@ func (s *Service) updateTaskSettings(w http.ResponseWriter, r *http.Request) {
 		httpjson.Error(w, http.StatusBadRequest, "unknown category mode")
 		return
 	}
-	if input.BacklogColumnID != nil && uuid.Validate(*input.BacklogColumnID) != nil {
+	if invalidColumn(input.BacklogColumnID) || invalidColumn(input.DoneColumnID) {
 		httpjson.Error(w, http.StatusBadRequest, "invalid column")
 		return
 	}
-	err := s.store.updateTaskSettings(r.Context(), UserID(r.Context()), input.Categories, input.BacklogColumnID)
+	err := s.store.updateTaskSettings(r.Context(), UserID(r.Context()), input)
 	if errors.Is(err, errNotFound) {
 		httpjson.Error(w, http.StatusBadRequest, "unknown column")
 		return
@@ -332,6 +329,10 @@ func (s *Service) updateTaskSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func invalidColumn(id *string) bool {
+	return id != nil && uuid.Validate(*id) != nil
 }
 
 func (s *Service) updateLanguage(w http.ResponseWriter, r *http.Request) {

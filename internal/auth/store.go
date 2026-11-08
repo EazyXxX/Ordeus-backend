@@ -46,6 +46,8 @@ type User struct {
 	TaskCategories string `json:"taskCategories"`
 	// BacklogColumnID is empty when the board's first column stands in for it.
 	BacklogColumnID *string `json:"backlogColumnId"`
+	// DoneColumnID is empty when the board's last column stands in for it.
+	DoneColumnID *string `json:"doneColumnId"`
 }
 
 type Stats struct {
@@ -79,8 +81,8 @@ func (s *store) createUser(ctx context.Context, email, name, passwordHash, langu
 
 		err := tx.QueryRow(ctx, `
 			INSERT INTO users (email, name, password_hash, language) VALUES ($1, $2, $3, $4)
-			RETURNING id::text, color, backlog_column_id::text`, email, name, passwordHash, language,
-		).Scan(&user.ID, &user.Color, &user.BacklogColumnID)
+			RETURNING id::text, color`, email, name, passwordHash, language,
+		).Scan(&user.ID, &user.Color)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
 			return errEmailTaken
@@ -125,9 +127,10 @@ func seedColumns(ctx context.Context, tx pgx.Tx, userID, language string) error 
 		}
 	}
 	_, err = tx.Exec(ctx, `
-		UPDATE users SET backlog_column_id = (
-			SELECT id FROM kanban_columns WHERE user_id = $1 ORDER BY position, id LIMIT 1
-		) WHERE id = $1`, userID)
+		UPDATE users SET
+			backlog_column_id = (SELECT id FROM kanban_columns WHERE user_id = $1 ORDER BY position, id LIMIT 1),
+			done_column_id = (SELECT id FROM kanban_columns WHERE user_id = $1 ORDER BY position DESC, id DESC LIMIT 1)
+		WHERE id = $1`, userID)
 	return err
 }
 
@@ -136,9 +139,11 @@ func (s *store) credentials(ctx context.Context, email string) (User, string, er
 	var user User
 	var hash string
 	err := s.pool.QueryRow(ctx, `
-		SELECT id::text, email, name, color, language, task_categories, backlog_column_id::text, password_hash
+		SELECT id::text, email, name, color, language, task_categories, backlog_column_id::text, done_column_id::text,
+			password_hash
 		FROM users WHERE lower(email) = lower($1)`, email,
-	).Scan(&user.ID, &user.Email, &user.Name, &user.Color, &user.Language, &user.TaskCategories, &user.BacklogColumnID, &hash)
+	).Scan(&user.ID, &user.Email, &user.Name, &user.Color, &user.Language, &user.TaskCategories, &user.BacklogColumnID,
+		&user.DoneColumnID, &hash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, "", errNotFound
 	}
@@ -170,7 +175,8 @@ func (s *store) sessions(ctx context.Context, tokens []string) ([]session, error
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT s.token_hash, u.id::text, u.email, u.name, u.color, u.language, u.task_categories, u.backlog_column_id::text
+		SELECT s.token_hash, u.id::text, u.email, u.name, u.color, u.language, u.task_categories,
+			u.backlog_column_id::text, u.done_column_id::text
 		FROM sessions s
 		JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = ANY($1) AND s.expires_at > now()`, hashes)
@@ -184,7 +190,7 @@ func (s *store) sessions(ctx context.Context, tokens []string) ([]session, error
 		var hash []byte
 		var user User
 		err := rows.Scan(&hash, &user.ID, &user.Email, &user.Name, &user.Color, &user.Language,
-			&user.TaskCategories, &user.BacklogColumnID)
+			&user.TaskCategories, &user.BacklogColumnID, &user.DoneColumnID)
 		if err != nil {
 			return nil, err
 		}
@@ -222,20 +228,35 @@ func (s *store) updateLanguage(ctx context.Context, userID, language string) err
 	return err
 }
 
-// updateTaskSettings refuses a column of another account.
-func (s *store) updateTaskSettings(ctx context.Context, userID, categories string, backlogColumnID *string) error {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE users SET task_categories = $2, backlog_column_id = $3::uuid
-		WHERE id = $1 AND ($3::uuid IS NULL
-			OR EXISTS (SELECT 1 FROM kanban_columns WHERE id = $3::uuid AND user_id = $1))`,
-		userID, categories, backlogColumnID)
-	if err != nil {
+type TaskSettings struct {
+	Categories      string  `json:"categories"`
+	BacklogColumnID *string `json:"backlogColumnId"`
+	DoneColumnID    *string `json:"doneColumnId"`
+}
+
+// updateTaskSettings refuses a column of another account. Cards already in a
+// new done column count as done from their last change. Cards elsewhere keep
+// their time, which reports ignore outside the done column, so switching back
+// loses no history.
+func (s *store) updateTaskSettings(ctx context.Context, userID string, settings TaskSettings) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE users SET task_categories = $2, backlog_column_id = $3::uuid, done_column_id = $4::uuid
+			WHERE id = $1
+				AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM kanban_columns WHERE id = $3::uuid AND user_id = $1))
+				AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM kanban_columns WHERE id = $4::uuid AND user_id = $1))`,
+			userID, settings.Categories, settings.BacklogColumnID, settings.DoneColumnID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return errNotFound
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE kanban_cards SET completed_at = updated_at
+			WHERE user_id = $1 AND column_id = kanban_done_column($1) AND completed_at IS NULL`, userID)
 		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return errNotFound
-	}
-	return nil
+	})
 }
 
 func (s *store) updateProfile(ctx context.Context, userID, name, color string) error {

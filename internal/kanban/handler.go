@@ -50,6 +50,9 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /api/kanban/cards/{id}", h.updateCard)
 	mux.HandleFunc("DELETE /api/kanban/cards/{id}", h.deleteCard)
 	mux.HandleFunc("POST /api/kanban/cards/{id}/move", h.moveCard)
+	mux.HandleFunc("GET /api/kanban/reports", h.listReports)
+	mux.HandleFunc("POST /api/kanban/reports", h.createReport)
+	mux.HandleFunc("DELETE /api/kanban/reports/{week}", h.deleteReport)
 }
 
 func (h *handler) getBoard(w http.ResponseWriter, r *http.Request) {
