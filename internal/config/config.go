@@ -9,6 +9,7 @@ const (
 	defaultAIBaseURL   = "http://127.0.0.1:11434/v1"
 	defaultAIModel     = "gemma4:12b"
 	defaultSecretFile  = ".ordeus-secret"
+	defaultUploadsDir  = "uploads"
 	// Local reasoning models can spend minutes thinking and return no answer.
 	localReasoningEffort = "none"
 )
@@ -28,6 +29,8 @@ type Config struct {
 	SecretFile string
 	// SecureCookies must be on whenever the app is served over HTTPS.
 	SecureCookies bool
+	// UploadsDir holds the pictures attached to notes. Back it up with the database.
+	UploadsDir string
 }
 
 func Load() Config {
@@ -47,6 +50,7 @@ func Load() Config {
 		SecureCookies:      os.Getenv("ORDEUS_SECURE_COOKIES") == "true",
 		AIAllowPrivateURLs: os.Getenv("ORDEUS_AI_ALLOW_PRIVATE_URLS") == "true",
 		SecretFile:         env("ORDEUS_SECRET_FILE", defaultSecretFile),
+		UploadsDir:         env("ORDEUS_UPLOADS_DIR", defaultUploadsDir),
 	}
 }
 

@@ -83,7 +83,7 @@ func (c *Client) authorize(request *http.Request) {
 	}
 }
 
-// message content is text, or a list of parts for audio.
+// message content is text, or a list of parts for audio or images.
 type message struct {
 	Role    string `json:"role"`
 	Content any    `json:"content"`
@@ -93,6 +93,17 @@ type contentPart struct {
 	Type       string      `json:"type"`
 	Text       string      `json:"text,omitempty"`
 	InputAudio *inputAudio `json:"input_audio,omitempty"`
+	ImageURL   *imageURL   `json:"image_url,omitempty"`
+}
+
+type imageURL struct {
+	URL string `json:"url"`
+}
+
+// Image is a picture for the model to look at, in a format it reads: JPEG or PNG.
+type Image struct {
+	ContentType string
+	Data        []byte
 }
 
 type inputAudio struct {
@@ -129,11 +140,26 @@ type chatResponse struct {
 
 // Structured asks the model for JSON matching schema and decodes it into target.
 func (c *Client) Structured(ctx context.Context, system, user, name string, schema, target any) error {
-	content, err := c.complete(ctx, chatRequest{
+	return c.StructuredImages(ctx, system, user, name, schema, target, nil)
+}
+
+// StructuredImages is Structured with pictures sent after the text. The model
+// has to see images, or the provider refuses the request.
+func (c *Client) StructuredImages(ctx context.Context, system, user, name string, schema, target any, images []Image) error {
+	var content any = user
+	if len(images) > 0 {
+		parts := []contentPart{{Type: "text", Text: user}}
+		for _, image := range images {
+			url := "data:" + image.ContentType + ";base64," + base64.StdEncoding.EncodeToString(image.Data)
+			parts = append(parts, contentPart{Type: "image_url", ImageURL: &imageURL{URL: url}})
+		}
+		content = parts
+	}
+	answer, err := c.complete(ctx, chatRequest{
 		Temperature: structuredTemperature,
 		Messages: []message{
 			{Role: "system", Content: system},
-			{Role: "user", Content: user},
+			{Role: "user", Content: content},
 		},
 		ResponseFormat: &responseFormat{
 			Type:       "json_schema",
@@ -143,7 +169,7 @@ func (c *Client) Structured(ctx context.Context, system, user, name string, sche
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal([]byte(stripCodeFence(content)), target); err != nil {
+	if err := json.Unmarshal([]byte(stripCodeFence(answer)), target); err != nil {
 		return fmt.Errorf("decode structured output: %w", err)
 	}
 	return nil

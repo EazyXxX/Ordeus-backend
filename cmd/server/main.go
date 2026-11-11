@@ -66,7 +66,7 @@ func run() error {
 			return nil, err
 		}
 		return client, nil
-	})
+	}, cfg.UploadsDir)
 	go diaryService.Run(ctx)
 	kanbanService := kanban.New(pool, func(ctx context.Context, userID string) (kanban.StructuredModel, error) {
 		client, err := aiRouter.ForUser(ctx, userID)

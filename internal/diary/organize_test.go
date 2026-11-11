@@ -1,6 +1,8 @@
 package diary
 
 import (
+	"ordeus/backend/internal/ai"
+
 	"context"
 	"errors"
 	"slices"
@@ -261,7 +263,7 @@ func TestBuildPromptIncludesContext(t *testing.T) {
 		Folders: []string{"Работа"},
 		Tags:    []string{"идея"},
 		Notes:   []NoteRef{{ID: "1", Title: "Старая заметка"}},
-	})
+	}, 0, 0)
 	for _, part := range []string{
 		"Сегодня: 2026-11-06, пятница",
 		"2026-11-05 — четверг, вчера",
@@ -282,7 +284,7 @@ func (failingModel) Structured(context.Context, string, string, string, any, any
 }
 
 func TestOrganizeReportsModelFailure(t *testing.T) {
-	if _, err := organize(context.Background(), failingModel{}, "текст", "2026-11-06", organizerContext{}); err == nil {
+	if _, err := organize(context.Background(), failingModel{}, "текст", "2026-11-06", organizerContext{}, nil, 0); err == nil {
 		t.Fatal("expected an error")
 	}
 }
@@ -306,5 +308,71 @@ func TestWithDatedTitles(t *testing.T) {
 		if note.Title != want[i] {
 			t.Errorf("note %d: title = %q, want %q", i, note.Title, want[i])
 		}
+	}
+}
+
+func TestBuildPromptMentionsPictures(t *testing.T) {
+	prompt := buildPrompt("", "2026-11-06", organizerContext{Language: "en"}, 3, 5)
+	if !strings.Contains(prompt, "приложено фотографий: 5. Тебе показаны первые 3") {
+		t.Errorf("prompt lacks the pictures:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "на английском") {
+		t.Errorf("an English account without text gets no English rule:\n%s", prompt)
+	}
+	if strings.Contains(buildPrompt("запись", "2026-11-06", organizerContext{}, 0, 0), "фотографий") {
+		t.Error("a capture without pictures mentions them")
+	}
+}
+
+// visionModel records the pictures it was shown and answers with one note.
+type visionModel struct {
+	seen int
+}
+
+func (m *visionModel) Structured(ctx context.Context, system, user, name string, schema, target any) error {
+	return m.StructuredImages(ctx, system, user, name, schema, target, nil)
+}
+
+func (m *visionModel) StructuredImages(_ context.Context, _, _, _ string, _, target any, images []ai.Image) error {
+	m.seen = len(images)
+	result := target.(*plan)
+	result.Notes = []plannedNote{{Title: "", Body: "Закат над рекой.", Folder: "Фото"}}
+	return nil
+}
+
+func TestOrganizeShowsPicturesAndKeepsTheirDescription(t *testing.T) {
+	model := &visionModel{}
+	images := []ai.Image{{ContentType: "image/jpeg"}, {ContentType: "image/png"}}
+	got, err := organize(context.Background(), model, "  ", "2026-11-06", organizerContext{}, images, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.seen != 2 {
+		t.Errorf("model saw %d pictures", model.seen)
+	}
+	if got.Notes[0].Body != "Закат над рекой." {
+		t.Errorf("note = %+v", got.Notes[0])
+	}
+}
+
+func TestWithPhotoTitles(t *testing.T) {
+	notes := withPhotoTitles([]plannedNote{{Title: " "}, {Title: "Закат"}}, "en")
+	if notes[0].Title != "Photo" || notes[1].Title != "Закат" {
+		t.Errorf("titles = %q, %q", notes[0].Title, notes[1].Title)
+	}
+}
+
+func TestNormalizePlanMergesNotesMadeFromPicturesAlone(t *testing.T) {
+	raw := plan{Notes: []plannedNote{
+		{Title: "Закат", Body: "Закат над рекой.", Tags: []string{"закат"}, RelatedNew: []int{1}},
+		{Title: "Кот", Body: "Рыжий кот.", Tags: []string{"коты", "закат"}},
+	}}
+	got := normalizePlan(raw, "", 0)
+	if len(got.Notes) != 1 {
+		t.Fatalf("notes = %d", len(got.Notes))
+	}
+	note := got.Notes[0]
+	if note.Title != "Закат" || note.Body != "Закат над рекой.\n\nРыжий кот." || len(note.Tags) != 2 || len(note.RelatedNew) != 0 {
+		t.Errorf("note = %+v", note)
 	}
 }

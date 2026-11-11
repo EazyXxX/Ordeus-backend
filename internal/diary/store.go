@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,12 +33,14 @@ type NoteRef struct {
 }
 
 type Note struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	Folder    string    `json:"folder"`
-	Tags      []string  `json:"tags"`
-	Links     []NoteRef `json:"links"`
+	ID     string    `json:"id"`
+	Title  string    `json:"title"`
+	Body   string    `json:"body"`
+	Folder string    `json:"folder"`
+	Tags   []string  `json:"tags"`
+	Links  []NoteRef `json:"links"`
+	// Images are ids, oldest first; each is served at /api/diary/images/{id}.
+	Images    []string  `json:"images"`
 	FromAI    bool      `json:"fromAi"`
 	DailyDate *string   `json:"dailyDate"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -66,6 +69,8 @@ type Capture struct {
 	Status    string    `json:"status"`
 	Error     string    `json:"error"`
 	CreatedAt time.Time `json:"createdAt"`
+	// Images counts the pictures sent with the capture.
+	Images int `json:"images"`
 }
 
 type NoteFilter struct {
@@ -111,6 +116,9 @@ func (s *store) notes(ctx context.Context, userID string, filter NoteFilter) ([]
 					ON other.id = CASE WHEN l.note_a = n.id THEN l.note_b ELSE l.note_a END
 				WHERE n.id IN (l.note_a, l.note_b)
 			), '[]'::jsonb),
+			COALESCE((
+				SELECT array_agg(i.id::text ORDER BY i.id) FROM diary_note_images i WHERE i.note_id = n.id
+			), '{}'::text[]),
 			n.capture_id IS NOT NULL, to_char(n.daily_date, 'YYYY-MM-DD'), n.created_at, n.updated_at
 		FROM diary_notes n
 		LEFT JOIN diary_folders f ON f.id = n.folder_id
@@ -131,7 +139,7 @@ func (s *store) notes(ctx context.Context, userID string, filter NoteFilter) ([]
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Note, error) {
 		var note Note
-		err := row.Scan(&note.ID, &note.Title, &note.Body, &note.Folder, &note.Tags, &note.Links,
+		err := row.Scan(&note.ID, &note.Title, &note.Body, &note.Folder, &note.Tags, &note.Links, &note.Images,
 			&note.FromAI, &note.DailyDate, &note.CreatedAt, &note.UpdatedAt)
 		return note, err
 	})
@@ -249,19 +257,45 @@ func (s *store) deleteFolder(ctx context.Context, userID, id string) error {
 	return requireRow(tag.RowsAffected(), err)
 }
 
-func (s *store) createCapture(ctx context.Context, userID, text, writtenOn string) (Capture, error) {
-	capture := Capture{Text: text, Status: statusPending}
-	err := s.pool.QueryRow(ctx,
-		`INSERT INTO diary_captures (user_id, raw_text, written_on) VALUES ($1, $2, $3::date) RETURNING id::text, created_at`,
-		userID, text, writtenOn,
-	).Scan(&capture.ID, &capture.CreatedAt)
+// createCapture stores the text and its pictures in one step, so the worker
+// never takes a capture whose pictures are still on their way.
+func (s *store) createCapture(ctx context.Context, userID, text, writtenOn string, images []upload, files imageFiles) (Capture, error) {
+	capture := Capture{Text: text, Status: statusPending, Images: len(images)}
+	var written []string
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx,
+			`INSERT INTO diary_captures (user_id, raw_text, written_on) VALUES ($1, $2, $3::date) RETURNING id::text, created_at`,
+			userID, text, writtenOn,
+		).Scan(&capture.ID, &capture.CreatedAt)
+		if err != nil {
+			return err
+		}
+		for _, image := range images {
+			id := uuid.Must(uuid.NewV7()).String()
+			_, err := tx.Exec(ctx, `
+				INSERT INTO diary_note_images (id, capture_id, user_id, content_type, size_bytes) VALUES ($1, $2, $3, $4, $5)`,
+				id, capture.ID, userID, image.contentType, len(image.data))
+			if err != nil {
+				return err
+			}
+			if err := files.save(userID, id, image.data); err != nil {
+				return err
+			}
+			written = append(written, id)
+		}
+		return nil
+	})
+	if err != nil {
+		files.remove(userID, written)
+	}
 	return capture, err
 }
 
 // unfinishedCaptures returns everything not yet turned into notes.
 func (s *store) unfinishedCaptures(ctx context.Context, userID string) ([]Capture, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id::text, raw_text, status, error, created_at
+		SELECT id::text, raw_text, status, error, created_at,
+			(SELECT count(*)::int FROM diary_note_images i WHERE i.capture_id = diary_captures.id)
 		FROM diary_captures
 		WHERE status <> 'done' AND user_id = $1
 		ORDER BY id`, userID)
@@ -371,6 +405,12 @@ func (s *store) applyPlan(ctx context.Context, userID, captureID string, result 
 			if err := suggestEmojis(ctx, tx, userID, folderID, note); err != nil {
 				return err
 			}
+		}
+		// The pictures go to the first note: a split capture rarely has a
+		// picture for each part, and the author can move them.
+		if _, err := tx.Exec(ctx, `
+			UPDATE diary_note_images SET note_id = $1, capture_id = NULL WHERE capture_id = $2`, ids[0], captureID); err != nil {
+			return err
 		}
 		for i, note := range result.Notes {
 			links := make([]string, 0, len(note.RelatedExisting)+len(note.RelatedNew))

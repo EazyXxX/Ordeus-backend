@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,13 +25,16 @@ type ModelFor func(ctx context.Context, userID string) (StructuredModel, error)
 
 type Service struct {
 	store    *store
+	files    imageFiles
 	modelFor ModelFor
 	wake     chan struct{}
 }
 
-func New(pool *pgxpool.Pool, modelFor ModelFor) *Service {
+// New keeps note images under uploadsDir.
+func New(pool *pgxpool.Pool, modelFor ModelFor, uploadsDir string) *Service {
 	return &Service{
 		store:    &store{pool: pool},
+		files:    imageFiles{dir: uploadsDir},
 		modelFor: modelFor,
 		wake:     make(chan struct{}, 1),
 	}
@@ -92,9 +96,21 @@ func (s *Service) processNext(ctx context.Context) error {
 		return s.fail(ctx, capture.id, err)
 	}
 
+	stored, err := s.store.captureImages(ctx, capture.id)
+	if err != nil {
+		return s.fail(ctx, capture.id, err)
+	}
+	images := s.files.modelImages(capture.userID, stored)
+
 	organizeCtx, cancel := context.WithTimeout(ctx, organizeTimeout)
 	defer cancel()
-	result, err := organize(organizeCtx, model, capture.text, capture.writtenOn, known)
+	result, err := organize(organizeCtx, model, capture.text, capture.writtenOn, known, images, len(stored))
+	// A model that cannot see pictures refuses them. With text there is still
+	// enough to make the note, and the pictures go into it all the same.
+	if err != nil && len(images) > 0 && strings.TrimSpace(capture.text) != "" && organizeCtx.Err() == nil {
+		slog.Warn("organize with images failed, trying text alone", "id", capture.id, "error", err)
+		result, err = organize(organizeCtx, model, capture.text, capture.writtenOn, known, nil, len(stored))
+	}
 	if err != nil {
 		return s.fail(ctx, capture.id, err)
 	}
