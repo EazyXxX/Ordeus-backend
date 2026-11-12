@@ -15,6 +15,11 @@ import (
 	"strings"
 )
 
+// ErrBadAnswer means the model answered with something that is not the JSON it
+// was asked for. A local model that runs out of context stops mid-answer, which
+// ends up here too.
+var ErrBadAnswer = errors.New("decode structured output")
+
 const (
 	maxErrorBodyBytes     = 500
 	maxResponseBytes      = 16 << 20
@@ -170,7 +175,7 @@ func (c *Client) StructuredImages(ctx context.Context, system, user, name string
 		return err
 	}
 	if err := json.Unmarshal([]byte(stripCodeFence(answer)), target); err != nil {
-		return fmt.Errorf("decode structured output: %w", err)
+		return fmt.Errorf("%w: %v", ErrBadAnswer, err)
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package diary
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -310,6 +311,53 @@ func (s *store) retryCapture(ctx context.Context, userID, id string) error {
 		UPDATE diary_captures SET status = 'pending', error = ''
 		WHERE id = $1 AND user_id = $2 AND status = 'failed'`, id, userID)
 	return requireRow(tag.RowsAffected(), err)
+}
+
+// keepCapture saves a failed capture as it is: the whole text, in the fallback
+// folder, with its pictures. The note does not count as sorted by the model.
+func (s *store) keepCapture(ctx context.Context, userID, id string) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var text, language string
+		var images int
+		err := tx.QueryRow(ctx, `
+			SELECT c.raw_text, u.language,
+				(SELECT count(*)::int FROM diary_note_images i WHERE i.capture_id = c.id)
+			FROM diary_captures c JOIN users u ON u.id = c.user_id
+			WHERE c.id = $1 AND c.user_id = $2 AND c.status = 'failed'
+			FOR UPDATE OF c`, id, userID).Scan(&text, &language, &images)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errNotFound
+		}
+		if err != nil {
+			return err
+		}
+
+		folder := fallbackFolder
+		if language == "en" {
+			folder = englishFallback
+		}
+		folderID, err := ensureFolder(ctx, tx, userID, folder)
+		if err != nil {
+			return err
+		}
+		title := keptTitle(text)
+		if title == "" {
+			title = withPhotoTitles([]plannedNote{{}}, language)[0].Title
+		}
+		noteID, err := insertNote(ctx, tx, userID, title, strings.TrimSpace(text), folderID, nil, nil)
+		if err != nil {
+			return err
+		}
+		if images > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE diary_note_images SET note_id = $1, capture_id = NULL WHERE capture_id = $2`, noteID, id); err != nil {
+				return err
+			}
+		}
+		_, err = tx.Exec(ctx,
+			`UPDATE diary_captures SET status = 'done', error = '', processed_at = now() WHERE id = $1`, id)
+		return err
+	})
 }
 
 func (s *store) deleteFailedCapture(ctx context.Context, userID, id string) error {

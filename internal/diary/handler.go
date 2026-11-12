@@ -52,6 +52,7 @@ func (s *Service) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/diary/captures", s.listCaptures)
 	mux.HandleFunc("POST /api/diary/captures", s.createCapture)
 	mux.HandleFunc("POST /api/diary/captures/{id}/retry", s.retryCapture)
+	mux.HandleFunc("POST /api/diary/captures/{id}/keep", s.keepCapture)
 	mux.HandleFunc("DELETE /api/diary/captures/{id}", s.deleteCapture)
 }
 
@@ -229,6 +230,13 @@ func (s *Service) retryCapture(w http.ResponseWriter, r *http.Request) {
 		s.notifyWorker()
 	}
 	finish(w, r, err)
+}
+
+// keepCapture turns a capture the model could not sort into a plain note.
+func (s *Service) keepCapture(w http.ResponseWriter, r *http.Request) {
+	if id, ok := httpjson.PathID(w, r); ok {
+		finish(w, r, s.store.keepCapture(r.Context(), auth.UserID(r.Context()), id))
+	}
 }
 
 // readCaptureForm reads the text, the day and up to ten pictures.

@@ -5,6 +5,7 @@ import (
 
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -263,7 +264,7 @@ func TestBuildPromptIncludesContext(t *testing.T) {
 		Folders: []string{"Работа"},
 		Tags:    []string{"идея"},
 		Notes:   []NoteRef{{ID: "1", Title: "Старая заметка"}},
-	}, 0, 0)
+	}, 0, 0, false)
 	for _, part := range []string{
 		"Сегодня: 2026-11-06, пятница",
 		"2026-11-05 — четверг, вчера",
@@ -312,14 +313,14 @@ func TestWithDatedTitles(t *testing.T) {
 }
 
 func TestBuildPromptMentionsPictures(t *testing.T) {
-	prompt := buildPrompt("", "2026-11-06", organizerContext{Language: "en"}, 3, 5)
+	prompt := buildPrompt("", "2026-11-06", organizerContext{Language: "en"}, 3, 5, false)
 	if !strings.Contains(prompt, "приложено фотографий: 5. Тебе показаны первые 3") {
 		t.Errorf("prompt lacks the pictures:\n%s", prompt)
 	}
 	if !strings.Contains(prompt, "на английском") {
 		t.Errorf("an English account without text gets no English rule:\n%s", prompt)
 	}
-	if strings.Contains(buildPrompt("запись", "2026-11-06", organizerContext{}, 0, 0), "фотографий") {
+	if strings.Contains(buildPrompt("запись", "2026-11-06", organizerContext{}, 0, 0, false), "фотографий") {
 		t.Error("a capture without pictures mentions them")
 	}
 }
@@ -374,5 +375,98 @@ func TestNormalizePlanMergesNotesMadeFromPicturesAlone(t *testing.T) {
 	note := got.Notes[0]
 	if note.Title != "Закат" || note.Body != "Закат над рекой.\n\nРыжий кот." || len(note.Tags) != 2 || len(note.RelatedNew) != 0 {
 		t.Errorf("note = %+v", note)
+	}
+}
+
+func TestKeptTitle(t *testing.T) {
+	long := "Сегодня с самого утра думал о том, как устроить неделю, чтобы успеть и поработать, и отдохнуть"
+	tests := map[string]string{
+		"Короткая мысль\nи продолжение": "Короткая мысль",
+		long:  "Сегодня с самого утра думал о том, как устроить неделю…",
+		"   ": "",
+	}
+	for text, want := range tests {
+		if got := keptTitle(text); got != want {
+			t.Errorf("keptTitle(%q) = %q, want %q", text, got, want)
+		}
+	}
+}
+
+// scriptedModel answers each call with the next error, or with one note.
+type scriptedModel struct {
+	errs    []error
+	prompts []string
+}
+
+func (m *scriptedModel) Structured(_ context.Context, _, user, _ string, _, target any) error {
+	m.prompts = append(m.prompts, user)
+	if call := len(m.prompts) - 1; call < len(m.errs) && m.errs[call] != nil {
+		return m.errs[call]
+	}
+	target.(*plan).Notes = []plannedNote{
+		{Title: "Неделя", Body: "", Folder: "Личное", Tags: []string{"планы"}, RelatedExisting: []int{1}},
+		{Title: "Лишняя", Body: "кусок"},
+	}
+	return nil
+}
+
+func TestOrganizeKeepsALongEntryWhole(t *testing.T) {
+	text := strings.Repeat("Длинная надиктованная мысль о неделе. ", 60)
+	model := &scriptedModel{}
+	got, err := organize(context.Background(), model, text, "2026-11-12", organizerContext{
+		Notes: []NoteRef{{ID: "1", Title: "Старая"}},
+	}, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Notes) != 1 || got.Notes[0].Body != strings.TrimSpace(text) || got.Notes[0].Title != "Неделя" {
+		t.Fatalf("notes = %+v", got.Notes)
+	}
+	if len(got.Notes[0].RelatedExisting) != 1 {
+		t.Errorf("links to existing notes were lost: %+v", got.Notes[0])
+	}
+	if !strings.Contains(model.prompts[0], "Запись длинная") {
+		t.Error("the prompt does not ask to leave the body empty")
+	}
+}
+
+func TestOrganizeRetriesACutOffAnswerWithoutExistingNotes(t *testing.T) {
+	model := &scriptedModel{errs: []error{fmt.Errorf("%w: unexpected end of JSON input", ai.ErrBadAnswer)}}
+	got, err := organize(context.Background(), model, "короткая запись", "2026-11-12", organizerContext{
+		Notes: []NoteRef{{ID: "1", Title: "Старая заметка"}},
+	}, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(model.prompts) != 2 {
+		t.Fatalf("model was asked %d times", len(model.prompts))
+	}
+	if strings.Contains(model.prompts[1], "Старая заметка") || !strings.Contains(model.prompts[1], "Запись длинная") {
+		t.Errorf("retry prompt:\n%s", model.prompts[1])
+	}
+	if got.Notes[0].Body != "короткая запись" || len(got.Notes[0].RelatedExisting) != 0 {
+		t.Errorf("note = %+v", got.Notes[0])
+	}
+}
+
+func TestOrganizeDoesNotRetryOtherFailures(t *testing.T) {
+	model := &scriptedModel{errs: []error{errors.New("offline")}}
+	if _, err := organize(context.Background(), model, "запись", "2026-11-12", organizerContext{}, nil, 0); err == nil {
+		t.Fatal("expected an error")
+	}
+	if len(model.prompts) != 1 {
+		t.Errorf("model was asked %d times", len(model.prompts))
+	}
+}
+
+func TestExcerpt(t *testing.T) {
+	short := strings.Repeat("а", excerptHeadRunes+excerptTailRunes)
+	if got, cut := excerpt(short); cut || got != short {
+		t.Error("a text that fits was cut")
+	}
+	long := strings.Repeat("н", excerptHeadRunes) + strings.Repeat("с", 500) + strings.Repeat("к", excerptTailRunes)
+	got, cut := excerpt(long)
+	if !cut || strings.Contains(got, "с") || !strings.HasPrefix(got, "ннн") || !strings.HasSuffix(got, "ккк") {
+		t.Errorf("excerpt of %d runes is wrong", len([]rune(long)))
 	}
 }

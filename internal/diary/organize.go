@@ -2,6 +2,7 @@ package diary
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -26,7 +27,19 @@ const (
 	// A local model holds about 4096 tokens, so it sees only the first few
 	// pictures. The rest still go into the note.
 	maxModelImages = 3
+
+	// Past this length the model does not copy the entry back: an answer
+	// as long as the entry would not fit a local model's context.
+	longEntryRunes = 1500
+	// Of an entry longer than both together, the model reads only the start
+	// and the end. The note keeps all of it.
+	excerptHeadRunes = 3000
+	excerptTailRunes = 1000
 )
+
+const longEntryRule = `
+
+Запись длинная, поэтому правила другие: сделай ровно одну заметку и оставь body пустой строкой, программа сама вставит туда весь текст. Разделять запись нельзя, даже если автор об этом просит.`
 
 const organizerPrompt = `Ты ведёшь личный дневник автора, устроенный как Zettelkasten.
 Автор быстро записывает всё, что пришло в голову. Разложи запись по полочкам.
@@ -146,21 +159,51 @@ type imageModel interface {
 
 // organize sorts one capture. images are the pictures the model may look at,
 // and attached counts every picture of the capture, seen or not.
+//
+// A long entry goes in the long mode, where the model does not copy the text
+// back. When an answer still comes back cut off, the capture is tried once
+// more in the long mode without the list of existing notes, the largest part
+// of the prompt after the entry itself.
 func organize(ctx context.Context, model StructuredModel, text, writtenOn string, known organizerContext, images []ai.Image, attached int) (plan, error) {
+	long := utf8.RuneCountInString(text) > longEntryRunes
+	result, err := askOrganizer(ctx, model, text, writtenOn, known, images, attached, long)
+	if errors.Is(err, ai.ErrBadAnswer) && ctx.Err() == nil {
+		known.Notes = nil
+		long = true
+		result, err = askOrganizer(ctx, model, text, writtenOn, known, images, attached, long)
+	}
+	if err != nil {
+		return plan{}, err
+	}
+	if long && len(result.Notes) > 0 {
+		result.Notes = []plannedNote{result.Notes[0]}
+		result.Notes[0].Body = text
+	}
+	normalized := normalizePlan(result, text, len(known.Notes))
+	notes := withValidDailyDates(normalized.Notes, writtenOn)
+	return plan{Notes: withPhotoTitles(withDatedTitles(withLocalFallback(notes, known.Language)), known.Language)}, nil
+}
+
+func askOrganizer(ctx context.Context, model StructuredModel, text, writtenOn string, known organizerContext, images []ai.Image, attached int, long bool) (plan, error) {
 	var result plan
-	prompt := buildPrompt(text, writtenOn, known, len(images), attached)
+	prompt := buildPrompt(text, writtenOn, known, len(images), attached, long)
 	var err error
 	if vision, ok := model.(imageModel); ok && len(images) > 0 {
 		err = vision.StructuredImages(ctx, organizerPrompt, prompt, "diary_plan", planSchema, &result, images)
 	} else {
 		err = model.Structured(ctx, organizerPrompt, prompt, "diary_plan", planSchema, &result)
 	}
-	if err != nil {
-		return plan{}, err
+	return result, err
+}
+
+// excerpt shortens a very long entry to its start and end, which is enough to
+// name it and find its folder.
+func excerpt(text string) (string, bool) {
+	runes := []rune(text)
+	if len(runes) <= excerptHeadRunes+excerptTailRunes {
+		return text, false
 	}
-	normalized := normalizePlan(result, text, len(known.Notes))
-	notes := withValidDailyDates(normalized.Notes, writtenOn)
-	return plan{Notes: withPhotoTitles(withDatedTitles(withLocalFallback(notes, known.Language)), known.Language)}, nil
+	return string(runes[:excerptHeadRunes]) + "\n[…]\n" + string(runes[len(runes)-excerptTailRunes:]), true
 }
 
 // withPhotoTitles names a note made from pictures alone when the model gave it
@@ -235,7 +278,7 @@ func withValidDailyDates(notes []plannedNote, writtenOn string) []plannedNote {
 	return result
 }
 
-func buildPrompt(text, writtenOn string, known organizerContext, seen, attached int) string {
+func buildPrompt(text, writtenOn string, known organizerContext, seen, attached int, long bool) string {
 	var prompt strings.Builder
 	if date, err := time.Parse(time.DateOnly, writtenOn); err == nil {
 		fmt.Fprintf(&prompt, "Сегодня: %s, %s.\nПрошедшие дни:\n", writtenOn, kanban.WeekdayName(date))
@@ -268,7 +311,15 @@ func buildPrompt(text, writtenOn string, known organizerContext, seen, attached 
 	if strings.TrimSpace(text) == "" {
 		reply = ai.ReplyIn(known.Language)
 	}
-	fmt.Fprintf(&prompt, "\n<entry>\n%s\n</entry>%s", text, reply)
+	entry := text
+	if long {
+		var cut bool
+		if entry, cut = excerpt(text); cut {
+			prompt.WriteString("\nЗапись очень длинная: тебе показаны её начало и конец, пропуск отмечен […].\n")
+		}
+		reply = longEntryRule + reply
+	}
+	fmt.Fprintf(&prompt, "\n<entry>\n%s\n</entry>%s", entry, reply)
 	return prompt.String()
 }
 
@@ -448,6 +499,21 @@ func validEmoji(text string) bool {
 		}
 	}
 	return hasSymbol
+}
+
+// keptTitle is the start of a text the model never saw: its first line, cut at
+// a word so that a long dictated entry does not end mid-word.
+func keptTitle(text string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(text), "\n")
+	line = strings.TrimSpace(line)
+	if utf8.RuneCountInString(line) <= derivedTitleLen {
+		return line
+	}
+	cut := string([]rune(line)[:derivedTitleLen])
+	if space := strings.LastIndex(cut, " "); space > 0 {
+		cut = cut[:space]
+	}
+	return strings.TrimRight(cut, " ,.;:—-") + "…"
 }
 
 func deriveTitle(body string) string {
